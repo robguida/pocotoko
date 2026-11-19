@@ -134,3 +134,41 @@ Each needs a sandbox home (never the real config folder). "Login" means a sessio
 10. **Check 19** — update the kit once and look for the `.orphaned_at` marker. Sandbox home, no login.
 11. **Confirm on the tested version** — check 3 (capture `UserPromptSubmit` and `SessionStart` input), check 13 (`/tasks` shows model and effort), and the real-transcript shape capture for 6.8. Sandbox home, login.
 12. **Check 21** — no live probe can settle a vendor format; the prefix list stays as decided above until a vendor page says otherwise.
+
+Status after the no-login half (below): items 5 and 7 to 10 are done. Item 6 is done except the `owner/repo` shorthand, which needs the host repo (see the later-stages notes). Items 1 to 4 and 11 still wait on a logged-in session in a sandbox home.
+
+### Day-one checks — live probe, no-login half (step 0c)
+
+- **Run on:** 2026-11-19, Windows 11.
+- **Claude Code version tested:** 2.1.328 (the native program, started directly with fixed arguments, no shell).
+- **Node:** 24.21.0 for every run; check 17 also on 20.20.2.
+- **How it ran:**
+    - Each check had its own sandbox home under `sandbox/`, with every guarded variable pointed inside it.
+    - Every run removed the login, API-key and Claude Code variables from the environment. The main probe also removed the common cloud-credential variables. Nobody logged in. Auto-update, telemetry and error reports were off.
+    - The sandbox guard's before/after listing covered 53 Claude Code calls (49 in the final run, 4 in the `engines` follow-up): 0 refused, 0 watched real items changed. The listing watches only the narrow spec 13.7 list. The post-change validate (3 calls) and an earlier, aborted run were also clean. One `claude --version` call ran with the sandbox environment but outside the listing.
+    - The git source was a sandbox copy of this repo, served on the loopback address through git's own HTTP backend. It was served over https and over plain http. The https certificate was a throwaway, trusted only inside the sandbox (by its git config and by the child process's CA variable).
+    - The copy had a tag at version 0.1.0, then its branch moved on to 0.1.1. So a working tag pin installs 0.1.0, and an ignored pin installs 0.1.1.
+
+| Check | Question | Live answer | Docs answer | Result |
+|---|---|---|---|---|
+| 9 | `validate --strict` on both plugin roots and the marketplace root; does a `CLAUDE.md` at the marketplace root warn? | Both plugin roots pass `--strict`. The marketplace root FAILED `--strict` with one warning: no marketplace `description`. The same failure appears with the `CLAUDE.md` removed, so `CLAUDE.md` is not the cause. A `CLAUDE.md` at the marketplace root gives no warning. A `CLAUDE.md` placed at a plugin root does warn ("not loaded as project context"). A top-level `description` and a `metadata.description` each make the marketplace root pass. Validate also prints "plugin directory" warnings that, in the tool's words, "do not change the result", even under `--strict`: here, a missing plugin icon on each plugin. | The marketplace-root warning was not stated. | DIFFERS (marketplace `description` needed) |
+| 10 | Install syntax with a tag | Two-command form: a git URL plus `#v0.1.0-probe` pins the marketplace (installed 0.1.0 while the branch was at 0.1.1), over https and http. One-command form `plugin install <name> --marketplace <url>#<tag>` also pins (installed 0.1.0) and writes `url` plus `ref` into the user settings. With no tag, both forms install the branch head (0.1.1). `<url>@<tag>` after a full `https://` URL FAILS: it is read as the address of a marketplace file (HTTP 404). A local folder path with `#<tag>` fails ("path does not exist"). The `owner/repo` shorthand was not tried (it needs a public host repo). `file://` git URLs are refused as a source format (seen in the first, aborted run). | `owner/repo#ref` and `owner/repo@ref` both pin; the one-command form takes the same sources. | DIFFERS (`@` fails after a full URL; `#` works) |
+| 11 | Command that lists an installed plugin's parts; registry file names | `plugin details <name>` and `plugin details <name>@<marketplace>` both print the version, source and a component inventory (skills, agents, hooks, MCP servers, LSP servers; all 0 at this stage). `plugin list --json` gives `id`, `version`, `scope`, `enabled`, `installPath`, `installedAt`, `lastUpdated`, `projectEnabled`, `hasUserConfig`. Registry files in the config folder: `plugins/known_marketplaces.json` (written by marketplace add) and `plugins/installed_plugins.json` (written by install). Marketplace add and install also write `settings.json` (`extraKnownMarketplaces`, `enabledPlugins`). Other items seen: `plugins/.last_inuse_sweep`, `plugins/marketplaces/<name>/`, and `plugins/cache/<marketplace>/<plugin>/<version>/` with an `.in_use` folder. With `CLAUDE_CONFIG_DIR` set, `.claude.json` and a `backups/` folder sit inside that config folder, not in the home folder. | `plugin details` and `plugin list --json` as stated; registry names not stated. | CONFIRMED; guard names confirmed |
+| 16 | Is `engines` accepted? | Yes. A manifest with `{"claude-code": ">=2.1.323"}` passes `--strict` and installs. `validate` does not compare the range with the running version (`>=9.0.0` also passes). Install of an unmet range from a git source is refused: "needs Claude Code >=9.0.0, this is 2.1.328". From a local folder it installs anyway, with a note. | Accepted from 2.1.323. | CONFIRMED (plus the install behaviour) |
+| 17 | Does `fs.lstat` report a Windows junction as a link? | Yes, on Node 24.21.0 and Node 20.20.2: `isSymbolicLink()` is true, `isDirectory()` is false, `readlink` works, and the real path differs from the link path. Node 22 and 26 were not run on Windows here. | Not stated. | ANSWERED |
+| 19 | Are old plugin versions kept after update or uninstall? | Yes. After `plugin update`, the old version folder stays and gets an `.orphaned_at` file (its content is a time stamp in milliseconds); the new version sits beside it. After uninstall, every version folder stays and each carries the marker. The 14-day removal could not be watched in one run; the docs answer stands for the timing. | Marker, then a sweep 14 days later; no sweep while nothing is installed. | CONFIRMED |
+
+**What changed in the design (spec first, see Appendix C):**
+
+1. `marketplace.json` gets a neutral top-level `description`, so `validate --strict` passes on the marketplace root (spec 14.1; the B3 consistency test checks it, 15.1). After the change, `validate --strict` passed on all three roots of this branch's files (`src/core`, `src/search`, the marketplace root), under the guard with no watched real item changed.
+2. The `CLAUDE.md` at the repo top stays. CI needs no accepted-warning entry for it (spec 4).
+3. The guard's registry file names are confirmed, and the TODO in `scripts/lib/guard.mjs` is closed. The watched list itself is unchanged.
+4. `engines`: the tested version meets the spec's condition. It is added in B8, in the same change as the README floor line (spec 14.3).
+5. The docs pin a version with `#<tag>` only, never `@<tag>` (spec 3.1 fact 9).
+6. The validate "no icon" plugin directory warning is accepted. The repo holds no image files (spec 1.4), and that warning does not change the result, even under `--strict`.
+
+**Notes for later stages:**
+
+- Install printed "7 userConfig options not yet set" (core) and "11 ... not yet set" (search), although most options have a `default`. Whether the default reaches the scripts is part of check 5 (logged-in half).
+- Whenever `CLAUDE_CONFIG_DIR` is set (even to a default-shaped path such as `<home>/.claude`), `.claude.json` lives inside that folder. The guard's listing reads only the default places: `~/.claude` for items 13.7 a, c, d and e, and `~/.claude.json` for item b. A developer who sets `CLAUDE_CONFIG_DIR` is not covered for any of them. This stays on the later list.
+- The `owner/repo` shorthand (`<owner>/<repo>#v<version>`, spec 12.1) was not probed. Prove it in both install forms once the host repo exists, before the B8 README is final.

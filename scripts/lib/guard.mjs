@@ -36,9 +36,11 @@ export const CHILD_DIR_VARS = Object.freeze([
   'XDG_CACHE_HOME',
 ]);
 
-// Plugin registry files watched by the listing (13.7 d).
-// TODO(build step 0c, day-one check 11): confirm these names with the live
-// probe and update this list if the probe names different files.
+// Plugin registry files watched by the listing (13.7 d), inside the config
+// folder. Confirmed by the live probe (build step 0c, day-one check 11):
+// adding a marketplace writes known_marketplaces.json, installing a plugin
+// writes installed_plugins.json. Both also change settings.json, which the
+// listing already watches.
 export const REGISTRY_FILES = Object.freeze([
   Object.freeze(['plugins', 'installed_plugins.json']),
   Object.freeze(['plugins', 'known_marketplaces.json']),
@@ -150,8 +152,9 @@ export function checkSandboxFolder({ repo = kitRoot(), platform = process.platfo
     problems.push('sandbox/ real path cannot be resolved (' + ((err && err.code) || 'error') + ')');
     return problems;
   }
-  // A junction may not be reported by lstat as a link (day-one check 17), so
-  // the real-path compare runs whatever lstat says.
+  // Day-one check 17 found that lstat reports a Windows junction as a link
+  // (Node 20 and 24). The real-path compare still runs whatever lstat says,
+  // so the check does not depend on that.
   if (!isInside(real, repoReal, platform) || samePath(real, repoReal, platform)) {
     problems.push('sandbox/ is a link or junction whose real path is outside the repo');
   } else if (!st.isDirectory() && !st.isSymbolicLink()) {

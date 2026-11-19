@@ -1,5 +1,6 @@
 {
   "name": "pocotoko",
+  "description": "Model and effort rules, a chat-length meter, a hand-off note skill and optional local search over notes and docs.",
   "owner": {
     "name": "Project maintainers"
   },
