@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "about": "Rules for scripts/scrub-scan.mjs (spec 13.1). Patterns are JavaScript regular expressions. Exemptions are per file and per rule, each with a reason and a max_hits number.",
+  "maintainer_label": "Project maintainers",
+  "canonical_name_source": "src/core/.claude-plugin/plugin.json",
+  "canonical_name_suffixes": ["", "-search"],
+  "home_path": {
+    "patterns": [
+      { "pattern": "(?<![A-Za-z0-9])[A-Za-z]:(?:\\\\{1,2}|/)Users(?:\\\\{1,2}|/)([^\\\\/\\s\"'`<>|:*?,;()\\[\\]{}]+)", "flags": "gi" },
+      { "pattern": "(?<![A-Za-z0-9_.~-])/(?:Users|home)/([^\\\\/\\s\"'`<>|:*?,;()\\[\\]{}]+)", "flags": "gi" }
+    ],
+    "placeholders": ["user", "username", "user-name", "user_name", "yourname", "your-name", "your_name", "you", "me", "name", "example", "someone", "runner", "default", "public", "shared", "all users"]
+  },
+  "email": {
+    "pattern": "(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,24}(?![A-Za-z0-9-])",
+    "flags": "g",
+    "allow": []
+  },
+  "host_handle": {
+    "url_pattern": "(?<![A-Za-z0-9.-])(?:www\\.)?(github\\.com[/:]|gitlab\\.com[/:]|bitbucket\\.org[/:]|codeberg\\.org/|gist\\.github\\.com/|raw\\.githubusercontent\\.com/|twitter\\.com/|x\\.com/|linkedin\\.com/in/|npmjs\\.com/~|sr\\.ht/~)([A-Za-z0-9_.-]+)(?:/([A-Za-z0-9_.-]+))?",
+    "install_pattern": "(?:marketplace\\s+add|--marketplace)\\s+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)",
+    "flags": "gi",
+    "owner_placeholders": ["owner", "user", "username", "your-name", "yourname", "your_name", "org", "organization", "example", "you", "name", "me", "repo-owner"],
+    "host_reserved_paths": ["settings", "features", "enterprise", "orgs", "marketplace", "apps", "login", "about", "pricing", "security", "topics", "sponsors", "collections", "explore", "notifications", "new", "contact", "site", "readme"],
+    "install_slug_allow": []
+  },
+  "iso_date": {
+    "pattern": "(?<![0-9A-Za-z])(?:19|20)[0-9]{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])(?![0-9])",
+    "flags": "g",
+    "scope_exclude": ["docs/changelog.md", "tests/fixtures/"]
+  },
+  "date_quote": {
+    "written_patterns": [
+      { "pattern": "(?<![A-Za-z])(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?\\s+[0-9]{1,2}(?:st|nd|rd|th)?,?\\s+[0-9]{4}(?![0-9])", "flags": "gi" },
+      { "pattern": "(?<![0-9])[0-9]{1,2}(?:st|nd|rd|th)?\\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\.?,?\\s+[0-9]{4}(?![0-9])", "flags": "gi" }
+    ],
+    "min_quoted_words": 3,
+    "scope_exclude": ["tests/fixtures/"]
+  },
+  "savings": {
+    "phrases_from_claude_md": ["uses fewer tokens"],
+    "phrases": ["fewer tokens", "save tokens", "saves tokens", "saving tokens", "token savings", "save money", "saves money", "cost savings", "cut costs", "cuts costs", "lower your bill", "cheaper to run"],
+    "patterns": [
+      { "pattern": "(?<![0-9.])[0-9]+(?:\\.[0-9]+)?\\s?(?:%|percent)\\s+(?:fewer|less|lower|cheaper|faster|smaller|savings?|reduction|off)(?![A-Za-z])", "flags": "gi" },
+      { "pattern": "(?<![A-Za-z])(?:save|saves|saved|saving|savings of|cut|cuts|reduce|reduces|reduced|lower|lowers|slash|slashes|trim|trims)\\s+(?:up to\\s+|over\\s+|about\\s+|around\\s+|by\\s+|nearly\\s+|roughly\\s+)?\\$?[0-9]+(?:[.,][0-9]+)?\\s?(?:%|percent|x(?![A-Za-z])|\u00d7)", "flags": "gi" },
+      { "pattern": "(?<![0-9.])[0-9]+(?:\\.[0-9]+)?\\s?(?:x|\u00d7)\\s+(?:cheaper|faster|fewer|less|smaller)(?![A-Za-z])", "flags": "gi" },
+      { "pattern": "\\$[0-9][0-9,.]*\\s+(?:saved|cheaper|less|savings|off)(?![A-Za-z])", "flags": "gi" }
+    ]
+  },
+  "names": {
+    "reserved_words": ["claude", "anthropic"],
+    "official_word": "official",
+    "for_claude_pattern": "for[\\s_-]*claude"
+  },
+  "secrets": {
+    "key_block": { "pattern": "-----BEGIN[A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----", "flags": "g" },
+    "vendor_prefixes": [
+      { "prefix": "AKIA", "min": 16, "chars": "A-Z0-9" },
+      { "prefix": "ASIA", "min": 16, "chars": "A-Z0-9" },
+      { "prefix": "ghp_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "gho_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "ghu_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "ghs_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "ghr_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "github_pat_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glpat-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "gloas-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "gldt-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glrt-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glrtr-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glcbt-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glptt-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glft-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glimt-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glagent-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glwt-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glsoat-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "glffct-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "xoxb-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "xoxp-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "xoxa-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "xoxr-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "xoxs-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "xapp-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "xoxe", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "xwfp-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "npm_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "sk_live_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "rk_live_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "sk_org_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "whsec_", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "sk-ant-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "sk-proj-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "sk-svcacct-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "sk-admin-", "min": 20, "chars": "A-Za-z0-9._-" },
+      { "prefix": "AIza", "min": 30, "chars": "A-Za-z0-9_-" }
+    ],
+    "jwt": { "pattern": "eyJ[A-Za-z0-9_-]{7,}\\.eyJ[A-Za-z0-9_-]{7,}\\.[A-Za-z0-9_-]*", "flags": "g" },
+    "conn_string": { "pattern": "(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{1,30}://(?![<$%{])[^\\s:/?#@'\"<>`]{1,256}:(?![<$%{*])[^\\s/?#@'\"<>`]{1,256}@", "flags": "g" },
+    "signed_url": { "pattern": "[?&#](?:X-Amz-Signature|X-Goog-Signature|sig|token|access_token|client_secret)=(?![<$%{*])[^\\s&#'\"<>`]+", "flags": "gi" },
+    "webhook": [
+      { "pattern": "hooks\\.slack\\.com/services/[A-Za-z0-9]", "flags": "gi" },
+      { "pattern": "discord(?:app)?\\.com/api/webhooks/[0-9]", "flags": "gi" }
+    ],
+    "setting": [
+      { "pattern": "(?<![A-Za-z0-9])[A-Z0-9_]{0,64}(?:PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]{0,64}\\s*[:=]\\s*['\"]?(?![<$%{*`])[^\\s'\"`]{8,}", "flags": "g" },
+      { "pattern": "(?<![A-Za-z0-9_])(?:password|passwd|passphrase|client_secret|secret_key|api_key|apikey|access_token)\\s*[:=]\\s*['\"](?![<$%{*])[^'\"\\s]{8,}['\"]", "flags": "g" }
+    ],
+    "auth_header": { "pattern": "Authorization\\s*:\\s*(?:Basic|Bearer)\\s+(?![<$%{*])[A-Za-z0-9._~+/=-]{8,}", "flags": "gi" },
+    "random": {
+      "token_pattern": "[A-Za-z0-9+/_=-]{32,}",
+      "flags": "g",
+      "short_min_len": 32,
+      "short_min_bits": 4.2,
+      "long_min_len": 40,
+      "long_min_bits": 4.5
+    }
+  },
+  "hex40": {
+    "pattern": "(?<![0-9A-Fa-f])[0-9A-Fa-f]{40}(?![0-9A-Fa-f])",
+    "flags": "g",
+    "allow_dir": ".github/workflows/",
+    "allow_line_pattern": "^\\s*(?:-\\s+)?uses:\\s*[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}(?:\\s+#.*)?\\s*$"
+  },
+  "copyright": {
+    "pattern": "^\\s*(?:#|//|/?\\*+|<!--|;)?\\s*Copyright\\s*(?:\\(c\\)|\u00a9)",
+    "flags": "i",
+    "allowed_file": "LICENSE",
+    "exempt_files": ["THIRD-PARTY-NOTICES"]
+  },
+  "exemptions": [
+    {
+      "file": "CLAUDE.md",
+      "rule": "savings-phrase",
+      "reason": "The project instructions quote the banned savings wording in order to ban it.",
+      "max_hits": 1
+    },
+    {
+      "file": "docs/design/*.md",
+      "rule": "host-handle",
+      "reason": "The design spec cites the Node.js release schedule file as a source, which names that project's public repo.",
+      "max_hits": 1
+    },
+    {
+      "file": "docs/changelog.md",
+      "rule": "host-handle",
+      "reason": "The day-one check log cites the Node.js release schedule file as a source, which names that project's public repo.",
+      "max_hits": 2
+    },
+    {
+      "file": "scripts/scrub-rules.json",
+      "rule": "savings-phrase",
+      "reason": "This file defines the savings phrase list the scan looks for.",
+      "max_hits": 2
+    }
+  ]
+}

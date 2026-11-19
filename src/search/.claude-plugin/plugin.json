@@ -1,0 +1,91 @@
+{
+  "name": "pocotoko-search",
+  "version": "0.1.0",
+  "description": "Optional local keyword search over a project's notes and docs.",
+  "author": {
+    "name": "Project maintainers"
+  },
+  "license": "MIT",
+  "keywords": ["search", "notes", "docs", "mcp", "local"],
+  "userConfig": {
+    "projects": {
+      "type": "string",
+      "title": "Projects to search",
+      "description": "Absolute folder paths that search is turned on for. Only an exact real-path match enables a project.",
+      "multiple": true,
+      "required": false
+    },
+    "matching": {
+      "type": "string",
+      "title": "Matching level",
+      "description": "exact matches whole words only. broad also matches word families, prefixes, near spellings and synonyms. Any other value means broad.",
+      "default": "broad",
+      "required": false
+    },
+    "word_families": {
+      "type": "string",
+      "title": "Word families",
+      "description": "english treats plural and other common word forms as one word. off turns that matching off. Any other value means english.",
+      "default": "english",
+      "required": false
+    },
+    "extra_types": {
+      "type": "string",
+      "title": "Extra file types",
+      "description": "Extra file extensions to index. The built-in never-list still applies.",
+      "multiple": true,
+      "required": false
+    },
+    "never_folders": {
+      "type": "string",
+      "title": "Never-search folders",
+      "description": "Folders to skip. This can only narrow what is indexed.",
+      "multiple": true,
+      "required": false
+    },
+    "never_globs": {
+      "type": "string",
+      "title": "Never-search patterns",
+      "description": "File patterns to skip. This can only narrow what is indexed.",
+      "multiple": true,
+      "required": false
+    },
+    "never_terms": {
+      "type": "string",
+      "title": "Never-index terms",
+      "description": "Terms that cause a chunk of text to be dropped. This can only narrow what is indexed.",
+      "multiple": true,
+      "required": false
+    },
+    "synonyms": {
+      "type": "string",
+      "title": "Synonym groups",
+      "description": "One group per entry, written term=alt|alt. One-way: a search for the term also looks for its alternatives. No commas inside an entry.",
+      "multiple": true,
+      "required": false
+    },
+    "drop_contacts": {
+      "type": "boolean",
+      "title": "Drop contact details",
+      "description": "Drop text chunks that hold email addresses or phone numbers.",
+      "default": true,
+      "required": false
+    },
+    "max_file_bytes": {
+      "type": "number",
+      "title": "Largest file size",
+      "description": "Largest file, in bytes, that is indexed. Kept between 1024 and 4194304.",
+      "default": 1048576,
+      "min": 1024,
+      "max": 4194304,
+      "required": false
+    },
+    "node_path": {
+      "type": "string",
+      "title": "Node program",
+      "description": "The Node program used to launch the search server. An absolute path to a real Node program is the safe setting on Windows. The default is node.",
+      "default": "node",
+      "required": false
+    }
+  }
+}

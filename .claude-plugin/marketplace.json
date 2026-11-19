@@ -1,0 +1,18 @@
+{
+  "name": "pocotoko",
+  "owner": {
+    "name": "Project maintainers"
+  },
+  "plugins": [
+    {
+      "name": "pocotoko",
+      "source": "./src/core",
+      "description": "Model and effort rules, a chat-length meter and a hand-off note skill."
+    },
+    {
+      "name": "pocotoko-search",
+      "source": "./src/search",
+      "description": "Optional local keyword search over a project's notes and docs."
+    }
+  ]
+}

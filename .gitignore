@@ -1,0 +1,8 @@
+sandbox/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+CLAUDE.local.md
+scrub-denylist*
+*.sqlite*

@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "description": "Developer tooling for the repository. Nothing here ships.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node scripts/run-tests.mjs",
+    "scrub": "node scripts/scrub-scan.mjs"
+  }
+}
