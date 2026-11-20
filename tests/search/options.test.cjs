@@ -33,7 +33,7 @@ test('both arrival forms give the same groups: an array, and one string joined b
   const b = R.parseSynonyms(list.join(','));
   const c = R.parseSynonyms(list.join('\n'));
   const d = R.parseSynonyms(list.join('\r\n'));
-  const e = R.parseSynonyms(JSON.stringify(list)); // a JSON-array text (the floor seam accepts it too)
+  const e = R.parseSynonyms(JSON.stringify(list)); // a JSON-array text, stored as written (live check 5)
   const want = [['deploy', ['ship', 'release']], ['undo', ['roll back']], ['ci', ['continuous integration']]];
   for (const p of [a, b, c, d, e]) {
     assert.deepEqual(groupsOf(p), want);

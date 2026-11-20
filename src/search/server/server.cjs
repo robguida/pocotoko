@@ -73,6 +73,8 @@ const LINES = Object.freeze({
   REBUILDING: 'IndexRebuilding: the index is being rebuilt from source after a change; search again shortly, or use your normal file search',
   WINDOWS_PERMS: 'windows: the index takes your profile folder permissions; they are not checked',
   BIND_FAILED: 'Search is off: the project could not be bound because of an internal error. Restart the session to try again.',
+  // 6.7 source-folder rule, 9.6 e: a plugin folder run from outside the plugin cache.
+  SOURCE_FOLDER: 'Search is off: the server runs from a plugin source folder (a developer install, or the plugin cache location was not passed to it), so it stores nothing. Install from a git source or copy by hand to turn it on.',
   // SR-12: shown in place of a bound folder whose path holds a never-term.
   FOLDER_MASKED: '(not shown: the folder path holds one of your never-terms)',
 });
@@ -162,7 +164,12 @@ function checkArgs(def, args) {
  * .mcp.json, as `${user_config.KEY}` substituted into SEARCH_OPTION_<KEY>.
  */
 function optionsFromEnv(env) {
-  // SEAM(check 5): how options reach the server. Default: each option through `env` only (never `args`), read here and passed raw to the existing parsers; a never-set option (an empty value, or raw `${user_config.KEY}` text) counts as unset through floor.isUnsetValue, so the option's default applies. The live answer may change only the key mapping here.
+  // SEAM(check 5): still open after the logged-in probe (Claude Code 2.1.329): no plugin
+  // MCP server started there, so whether `${user_config.KEY}` is substituted in `.mcp.json`
+  // `env`, and whether a never-set option blocks the launch (every hook naming one failed
+  // before its script ran; the cause is not isolated), is not yet seen. Safe default kept:
+  // each option through `env` only (never `args`), passed raw to the parsers; an empty value or raw `${user_config.KEY}` text counts as unset. If the
+  // server is not launched or gets no value, `projects` is unset and search stays off.
   const out = {};
   for (const k of OPTION_KEYS) {
     const raw = env[ENV_PREFIX + k.toUpperCase()];
@@ -284,6 +291,10 @@ function createServer({ env = process.env, cwd = process.cwd(), serverFile = __f
     s.install = inst;
     if (inst.mode === 'none') { s.reason = inst.reason; return; }
     if (inst.pluginDataIgnored) s.warnings.push(LINES.PLUGIN_DATA_IGNORED);
+    // A local-folder install (a developer path) runs from the source folder: read and
+    // write nothing there, git work tree or not (6.7, 9.6 e). The store's git-work-tree
+    // check (SR-21) is the second wall for any other copy inside a clone.
+    if (inst.sourceFolder) { s.reason = LINES.SOURCE_FOLDER; return; }
     if (inst.mode === 'plugin') {
       s.options = optionsFromEnv(env);
     } else {
@@ -559,6 +570,7 @@ async function skipReport({ env = process.env, cwd = process.cwd(), serverFile =
   const print = (line) => out.write(line + '\n');
   const inst = binder.installMode({ env, serverFile, home, platform });
   if (inst.mode === 'none') { print('skip report: ' + inst.reason); return 1; }
+  if (inst.sourceFolder) { print('skip report: ' + LINES.SOURCE_FOLDER); return 1; }
   const options = inst.mode === 'plugin' ? optionsFromEnv(env) : optionsFromFile(inst.dataRoot).options;
   const root = binder.resolveRoot({ env, cwd, platform });
   if (root.refused) { print('skip report: ' + root.refused); return 1; }

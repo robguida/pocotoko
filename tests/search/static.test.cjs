@@ -85,7 +85,7 @@ test('9.9: the search block is identical in its three places (the template, the 
   // The instructions field is checked on a live handshake in server.test.cjs.
 });
 
-test('T-34 / SR-44: .mcp.json is exec form: one stdio server named like the search plugin, command node (or the node_path option), args under ${CLAUDE_PLUGIN_ROOT}/, no shim or shell', () => {
+test('T-34 / SR-44: .mcp.json is exec form: one stdio server named like the search plugin, command node (6.10 a row 1), args under ${CLAUDE_PLUGIN_ROOT}/, no shim or shell', () => {
   const mcp = JSON.parse(fs.readFileSync(path.join(SEARCH, '.mcp.json'), 'utf8'));
   const plugin = JSON.parse(fs.readFileSync(path.join(SEARCH, '.claude-plugin', 'plugin.json'), 'utf8'));
   const names = Object.keys(mcp.mcpServers);
@@ -94,7 +94,10 @@ test('T-34 / SR-44: .mcp.json is exec form: one stdio server named like the sear
   assert.ok(!/official|for[\s_-]*claude/i.test(names[0]));
   const srv = mcp.mcpServers[names[0]];
   assert.equal(srv.type, 'stdio');
-  assert.ok(['node', '${user_config.node_path}'].includes(srv.command), 'command is node or the node_path option (6.10 a)');
+  // T-11 (live 0c, Claude Code 2.1.329) picked row 1: the command is the bare program name,
+  // and no option is used in the launch (the node_path option was removed, 6.10 a v).
+  assert.equal(srv.command, 'node', 'command is node (6.10 a row 1)');
+  assert.ok(!JSON.stringify([srv.command, srv.args]).includes('user_config'), 'no option in the launch line');
   assert.ok(Array.isArray(srv.args) && srv.args.length === 1);
   assert.equal(srv.args[0], '${CLAUDE_PLUGIN_ROOT}/server/server.cjs');
   assert.ok(fs.existsSync(path.join(SEARCH, 'server', 'server.cjs')));
@@ -104,21 +107,20 @@ test('T-34 / SR-44: .mcp.json is exec form: one stdio server named like the sear
   }
 });
 
-test('9.13 / T-34: every search option except node_path reaches the server through env only, as ${user_config.KEY}; none in args', () => {
+test('9.13 / T-34: every search option reaches the server through env only, as ${user_config.KEY}; none in args', () => {
   const mcp = JSON.parse(fs.readFileSync(path.join(SEARCH, '.mcp.json'), 'utf8'));
   const srv = Object.values(mcp.mcpServers)[0];
   const plugin = JSON.parse(fs.readFileSync(path.join(SEARCH, '.claude-plugin', 'plugin.json'), 'utf8'));
-  const keys = Object.keys(plugin.userConfig).filter((k) => k !== 'node_path').sort();
+  const keys = Object.keys(plugin.userConfig).sort();
   assert.deepEqual(S.OPTION_KEYS.slice().sort(), keys, 'the server reads every option the manifest declares');
   const expectEnv = {};
   for (const k of keys) expectEnv[S.ENV_PREFIX + k.toUpperCase()] = '${user_config.' + k + '}';
   assert.deepEqual(srv.env, expectEnv);
   assert.ok(!JSON.stringify(srv.args).includes('user_config'), 'no option in args');
-  assert.ok(!JSON.stringify(srv.env).includes('node_path'), 'node_path is the command, never an env value');
   for (const k of Object.keys(srv.env)) for (const w of RESERVED) assert.ok(!k.toLowerCase().includes(w), 'env name ' + k);
 });
 
-test('9.13: the search plugin userConfig keys, types and defaults equal the table; each has a title and a description; node_path defaults to node', () => {
+test('9.13: the search plugin userConfig keys, types and defaults equal the table; each has a title and a description; there is no node_path option (6.10 a v)', () => {
   const plugin = JSON.parse(fs.readFileSync(path.join(SEARCH, '.claude-plugin', 'plugin.json'), 'utf8'));
   const want = {
     projects: { type: 'string', multiple: true },
@@ -131,7 +133,6 @@ test('9.13: the search plugin userConfig keys, types and defaults equal the tabl
     synonyms: { type: 'string', multiple: true },
     drop_contacts: { type: 'boolean', default: true },
     max_file_bytes: { type: 'number', default: 1048576, min: 1024, max: 4194304 },
-    node_path: { type: 'string', default: 'node' },
   };
   assert.deepEqual(Object.keys(plugin.userConfig).sort(), Object.keys(want).sort());
   for (const [k, w] of Object.entries(want)) {
@@ -141,6 +142,14 @@ test('9.13: the search plugin userConfig keys, types and defaults equal the tabl
     assert.ok(typeof o.description === 'string' && o.description.length > 0, k + ' description');
     for (const f of ['default', 'multiple', 'min', 'max']) if (f in w) assert.equal(o[f], w[f], k + ' ' + f);
     if (!('default' in w)) assert.ok(!('default' in o), k + ' has no default');
+  }
+});
+
+test('6.10 a v: neither plugin manifest declares a node_path option (row 1: it would do nothing)', () => {
+  for (const dir of [CORE, SEARCH]) {
+    const plugin = JSON.parse(fs.readFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), 'utf8'));
+    assert.ok(!Object.prototype.hasOwnProperty.call(plugin.userConfig || {}, 'node_path'), dir);
+    assert.ok(!JSON.stringify(plugin).includes('node_path'), dir);
   }
 });
 

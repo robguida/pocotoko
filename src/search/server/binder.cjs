@@ -32,7 +32,7 @@ const REASONS = Object.freeze({
   NETWORK: 'refused: the folder is on a network path',
   PLUGINS: 'refused: the folder is the plugins folder or inside it',
   NOT_ENABLED: 'not enabled for this project',
-  LIST_UNSAFE: 'projects list could not be read safely; a folder path may contain a comma',
+  LIST_UNSAFE: 'projects list could not be read safely: a listed folder is missing or not an absolute path, or a folder path may contain a comma',
 });
 
 // Linux file-system types that are network mounts (statfs f_type). macOS does
@@ -90,6 +90,10 @@ function pluginsDirOf(env, configDir, platform = process.platform) {
  *   empty or not absolute; nothing is bound or written.
  * - copy: every other case; data root = <server folder>/../data, from the
  *   server's own real path only; a set variable is ignored and said so.
+ *   sourceFolder is true when <server folder>/../.claude-plugin/plugin.json
+ *   exists: a plugin folder run from outside the plugin cache (a local-folder
+ *   install, a developer path; a copy-by-hand install never creates it). The
+ *   server then binds nothing and writes nothing (6.7 source-folder rule, 9.6 e).
  */
 function installMode({ env, serverFile, home, platform = process.platform }) {
   const configDir = configDirOf(env, home, platform);
@@ -103,14 +107,27 @@ function installMode({ env, serverFile, home, platform = process.platform }) {
     return { mode: 'plugin', dataRoot: realLoose(raw.trim()), pluginDataIgnored: false, reason: null, configDir, pluginsDir };
   }
   const serverDir = path.dirname(serverReal);
+  const kitDir = path.dirname(serverDir);
   return {
     mode: 'copy',
-    dataRoot: path.join(path.dirname(serverDir), 'data'),
+    dataRoot: path.join(kitDir, 'data'),
     pluginDataIgnored: nonEmpty(raw),
+    sourceFolder: isPluginSourceFolder(kitDir),
     reason: null,
     configDir,
     pluginsDir,
   };
+}
+
+/** True when dir holds `.claude-plugin/plugin.json` (any kind of entry: fail closed). */
+function isPluginSourceFolder(dir) {
+  try {
+    fs.lstatSync(path.join(dir, '.claude-plugin', 'plugin.json'));
+    return true;
+  } catch (err) {
+    // Only "not there" counts as not a source folder; any other error fails closed.
+    return !(err && (err.code === 'ENOENT' || err.code === 'ENOTDIR'));
+  }
 }
 
 /**
@@ -118,17 +135,24 @@ function installMode({ env, serverFile, home, platform = process.platform }) {
  * else of the process start folder. Returns { rootReal, source } or { refused }.
  */
 function resolveRoot({ env, cwd, platform = process.platform }) {
-  // SEAM(check 6): what CLAUDE_PROJECT_DIR holds for a server started in a subfolder (that folder or the git top) is not yet probed. Default: bind exactly the variable's real path (else the start folder), never ask for MCP roots (SR-3), never walk up to a git top. The live answer may change only which folder this returns.
+  // Live check 6 (Claude Code 2.1.329): for a session started in a subfolder of a git
+  // project, CLAUDE_PROJECT_DIR holds that start folder, not the git top (seen by hooks).
+  // Bind exactly the variable's real path, else the start folder; never ask for MCP roots
+  // (SR-3); never walk up to a git top.
+  // SR-4 f: a network path is refused by its text, before any real-path resolution, so
+  // binding never touches the network.
   const v = env.CLAUDE_PROJECT_DIR;
   if (v !== undefined && v !== null && String(v) !== '') {
     const s = String(v);
     if (!isAbsoluteFor(s, platform)) return { refused: REASONS.PROJECT_DIR_RELATIVE };
+    if (isNetworkText(s, platform)) return { refused: REASONS.NETWORK };
     try {
       return { rootReal: fs.realpathSync.native(s), source: 'project_dir' };
     } catch (_) {
       return { refused: REASONS.PROJECT_DIR_MISSING };
     }
   }
+  if (isNetworkText(String(cwd), platform)) return { refused: REASONS.NETWORK };
   try {
     return { rootReal: fs.realpathSync.native(cwd), source: 'start_folder' };
   } catch (_) {
@@ -142,8 +166,13 @@ function isFilesystemRoot(p, platform) {
   return P.parse(r).root === r || fsx.samePath(P.dirname(r), r, platform);
 }
 
+/** The text-only network test (Windows UNC and `\\?\UNC\` forms): no file-system call. */
+function isNetworkText(p, platform) {
+  return platform === 'win32' && /^[\\/]{2}/.test(String(p).trim());
+}
+
 function isNetworkPath(p, platform, statfs) {
-  if (platform === 'win32') return /^[\\/]{2}/.test(p);
+  if (platform === 'win32') return isNetworkText(p, platform);
   if (platform === 'linux' && typeof statfs === 'function') {
     try {
       const s = statfs(p);
@@ -169,28 +198,89 @@ function refusedRoot(rootReal, ctx) {
   return null;
 }
 
+/** The real path of p when it is an existing folder, else null. Never throws. */
+function realDirOf(p) {
+  try {
+    const real = fs.realpathSync.native(p);
+    return fs.statSync(real).isDirectory() ? real : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * 9.1 e: how to read a joined `projects` string that holds a comma, decided by
+ * what exists, never by guessing. Both readings are checked on every OS (a
+ * Windows path may hold a comma too):
+ * - ONE path: the whole trimmed text is absolute and an existing folder;
+ * - the LIST: every piece from floor.splitListOption is absolute and an
+ *   existing folder.
+ * Exactly one reading fully exists → { entries } for that reading. Both or
+ * neither → { refused: true }. realDir (string → real folder path or null) is
+ * a test seam; it defaults to the real file system.
+ * A network piece (SR-4 f, by its text) is never looked up: it counts as
+ * present, so it can never settle an ambiguity by being assumed absent, and
+ * projectSwitch then refuses it as an entry without resolving it.
+ */
+function commaReading(raw, platform, realDir = realDirOf) {
+  const whole = String(raw).trim();
+  const { entries } = floor.splitListOption(raw);
+  const existsAbs = (p) => {
+    try {
+      const s = String(p).trim();
+      if (s === '' || s.includes('\u0000') || !isAbsoluteFor(s, platform)) return false;
+      if (isNetworkText(s, platform)) return true;
+      return realDir(s) !== null;
+    } catch (_) {
+      return false;
+    }
+  };
+  const oneExists = existsAbs(whole);
+  // Every piece is checked; one failing piece never stops the others being looked at.
+  let missing = 0;
+  for (const e of entries) if (!existsAbs(e)) missing++;
+  const listExists = entries.length > 0 && missing === 0;
+  if (oneExists && !listExists) return { entries: [whole] };
+  if (listExists && !oneExists) return { entries };
+  return { refused: true };
+}
+
 /**
  * The per-project switch (9.1, SR-6). raw: the `projects` option as it
  * arrived. Returns { enabled, bad, refusedEntries, listRefused }.
  * - Each entry must be absolute; it is resolved to its real path; it enables
  *   search only when it equals the bound root exactly (SR-5 compare).
  * - A relative, empty or unresolvable entry is ignored and counted (bad).
- * - When the list arrived as one joined string and any piece is not absolute,
- *   the whole option is refused (9.1 e).
+ * - A joined string that holds a comma is read by commaReading (9.1 e): as one
+ *   path or as the list, whichever alone exists; both or neither → the whole
+ *   option is refused. A joined string with no comma (new lines) is refused
+ *   whole if any piece is not absolute.
  */
 function projectSwitch(rootReal, raw, ctx = {}) {
   const platform = ctx.platform || process.platform;
-  // SEAM(check 5): the list arrives through floor.splitListOption only. Known without login: the CLI stores a list as one comma-joined line, and a never-set option is an empty value; the live probe confirms what the server sees.
-  const { entries, joined } = floor.splitListOption(raw);
+  // The list goes through floor.splitListOption only, and follows its open seam (check 5):
+  // the arrival form after substitution is not seen yet. An array or a JSON-array text is
+  // one entry per element. A joined string holding a comma is read by what exists (9.1 e,
+  // commaReading); this option fails closed if the arrival form differs (search stays off).
+  const split = floor.splitListOption(raw);
+  let entries = split.entries;
   const out = { enabled: false, bad: 0, refusedEntries: 0, listRefused: false };
-  if (joined && entries.some((e) => !isAbsoluteFor(String(e).trim(), platform))) {
-    out.listRefused = true;
-    return out;
+  if (split.joined) {
+    if (String(raw).includes(',')) {
+      const r = commaReading(raw, platform);
+      if (r.refused) { out.listRefused = true; return out; }
+      entries = r.entries;
+    } else if (entries.some((e) => !isAbsoluteFor(String(e).trim(), platform))) {
+      out.listRefused = true;
+      return out;
+    }
   }
   for (const e of entries) {
     try {
       const s = String(e).trim();
       if (!isAbsoluteFor(s, platform)) { out.bad++; continue; }
+      // SR-4 f before any resolve: a network entry is refused by its text, never looked up.
+      if (isNetworkText(s, platform)) { out.refusedEntries++; continue; }
       let real;
       try {
         real = fs.realpathSync.native(s);
@@ -251,8 +341,10 @@ module.exports = {
   installMode,
   resolveRoot,
   isFilesystemRoot,
+  isNetworkText,
   isNetworkPath,
   refusedRoot,
+  commaReading,
   projectSwitch,
   nodeInsideProject,
   homeDir,

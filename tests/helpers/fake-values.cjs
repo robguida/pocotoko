@@ -29,6 +29,14 @@ function isoDate(y, m, d) {
 function year() {
   return String(2000 + 26);
 }
+// The one fixed, obviously synthetic timestamp every fixture uses (spec 13.1 d): the
+// first millisecond of the year 2000, UTC, built from numbers.
+function fixtureTimeMs() {
+  return Date.UTC(2000, 0, 1, 0, 0, 0, 0);
+}
+function fixtureTimestamp() {
+  return new Date(fixtureTimeMs()).toISOString();
+}
 function writtenDate() {
   return ['November', '3,', year()].join(' ');
 }
@@ -186,7 +194,7 @@ function urlRealValueLines() {
 
 module.exports = {
   AT, BS, UPPER, LOWER, DIGITS, ALPHA,
-  charRange, gen, isoDate, year, writtenDate, fakeEmail, gitIdentityEmail, copyrightLine,
+  charRange, gen, isoDate, year, fixtureTimeMs, fixtureTimestamp, writtenDate, fakeEmail, gitIdentityEmail, copyrightLine,
   hex40, codeHostUrl, installLine, homePaths, savingsPhrase, savingsNumber,
   keyBlockHeader, fakeJwt, connString, signedUrl, webhookUrl, secretSetting, authHeader, vendorToken,
   markLine, connStringNoPassword, connStringForms, signedUrlForms, discordWebhook, awsSecretSetting,

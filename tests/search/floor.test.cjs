@@ -153,7 +153,7 @@ test('a term value never appears in the filter counts or its hash input', () => 
   assert.notEqual(f.optionsHash, base.optionsHash);
 });
 
-test('list options: array, JSON array text, comma-joined and new-line-joined give the same entries (seam check 5)', () => {
+test('list options: array, JSON array text, comma-joined and new-line-joined give the same entries (check 5)', () => {
   const want = ['one', 'two', 'three'];
   assert.deepEqual(Fl.splitListOption(want).entries, want);
   assert.deepEqual(Fl.splitListOption(JSON.stringify(want)).entries, want);
@@ -163,7 +163,19 @@ test('list options: array, JSON array text, comma-joined and new-line-joined giv
   assert.equal(Fl.splitListOption(want).joined, false);
 });
 
-test('unset options: empty or the raw substitution text means the default (seam check 5)', () => {
+test('live check 5: single-line texts stored as written (a comma list, a JSON-array text) read back as the entries typed', () => {
+  // A comma-separated single-line text (what the probe supplied) keeps spaces inside an entry.
+  assert.deepEqual(Fl.splitListOption(['alpha', 'beta gamma', 'delta'].join(',')).entries, ['alpha', 'beta gamma', 'delta']);
+  // A JSON-array text is stored as written; an element holding a comma stays one entry.
+  const withComma = ['alpha', 'delta,eps'];
+  const r = Fl.splitListOption(JSON.stringify(withComma));
+  assert.deepEqual(r.entries, withComma);
+  assert.equal(r.joined, false);
+  // A never-set option reads back as an empty value, even when it has a default.
+  assert.deepEqual(Fl.splitListOption(''), { entries: [], joined: false });
+});
+
+test('unset options: empty or the raw substitution text means the default (check 5)', () => {
   const placeholder = '$' + '{user_config.never_terms}';
   assert.equal(Fl.isUnsetValue(''), true);
   assert.equal(Fl.isUnsetValue(placeholder), true);

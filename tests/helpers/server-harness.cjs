@@ -38,7 +38,7 @@ function copyServer(destDir) {
   return path.join(destDir, 'server.cjs');
 }
 
-/** Join a list option the way the CLI stores it: one comma-joined line. */
+/** Join a list option as one comma-separated line (a form the server may receive; the arrival form after substitution is not seen yet). */
 function joinList(v) {
   return Array.isArray(v) ? v.join(',') : v;
 }

@@ -82,6 +82,59 @@ test('T-1: Windows UNC paths and the \\\\?\\UNC\\ form are network paths; Linux 
   assert.equal(B.isNetworkPath('/srv/x', 'linux', () => { throw new Error('x'); }), false);
 });
 
+test('SR-4 f: a UNC value (root, start folder or projects entry) is refused before any file-system call', () => {
+  const BS = String.fromCharCode(92);
+  const W = (...parts) => parts.join(BS);
+  const unc = BS + BS + W('srv', 'share', 'a');
+  const unc2 = BS + BS + W('srv', 'share', 'b');
+  const longUnc = BS + BS + W('?', 'UNC', 'srv', 'share', 'c');
+  const root = W('C:', 'proj');
+  // Spy: every file-system call the binder could make on a path records it and throws.
+  const calls = [];
+  const spied = [];
+  const spy = (obj, name) => {
+    if (typeof obj[name] !== 'function') return;
+    const orig = obj[name];
+    spied.push([obj, name, orig]);
+    obj[name] = (...a) => { calls.push(name + ' ' + String(a[0])); throw new Error('file-system call in a network test'); };
+  };
+  const nativeOrig = fs.realpathSync.native;
+  for (const n of ['realpathSync', 'statSync', 'lstatSync', 'statfsSync', 'existsSync', 'readdirSync', 'openSync']) spy(fs, n);
+  fs.realpathSync.native = (...a) => { calls.push('realpathSync.native ' + String(a[0])); throw new Error('file-system call in a network test'); };
+  const results = [];
+  try {
+    for (const raw of [[unc], [longUnc], JSON.stringify([unc, unc2]), unc, unc + '\n' + unc2]) {
+      const r = B.projectSwitch(root, raw, { platform: 'win32' });
+      results.push(['entries', raw, r]);
+    }
+    // A comma value whose pieces and whole text are all network paths: both readings count as
+    // present without a lookup, so the whole option is refused.
+    results.push(['comma', null, B.projectSwitch(root, unc + ',' + unc2, { platform: 'win32' })]);
+    results.push(['root', null, B.resolveRoot({ env: { CLAUDE_PROJECT_DIR: unc }, cwd: root, platform: 'win32' })]);
+    results.push(['root', null, B.resolveRoot({ env: { CLAUDE_PROJECT_DIR: longUnc }, cwd: root, platform: 'win32' })]);
+    results.push(['root', null, B.resolveRoot({ env: {}, cwd: unc, platform: 'win32' })]);
+  } finally {
+    for (const [obj, name, orig] of spied) obj[name] = orig;
+    fs.realpathSync.native = nativeOrig;
+  }
+  assert.deepEqual(calls, [], 'no file-system call was made');
+  for (const [kind, raw, r] of results) {
+    if (kind === 'entries') {
+      const n = Array.isArray(raw) ? raw.length : (String(raw).trim().startsWith('[') ? JSON.parse(raw).length : String(raw).split('\n').length);
+      assert.deepEqual(r, { enabled: false, bad: 0, refusedEntries: n, listRefused: false }, JSON.stringify(raw));
+    } else if (kind === 'comma') {
+      assert.deepEqual([r.listRefused, r.enabled], [true, false]);
+    } else {
+      assert.deepEqual(r, { refused: B.REASONS.NETWORK });
+    }
+  }
+  // The comma reading never asks its lookup about a network piece; the local piece decides.
+  const asked = [];
+  const seam = (p) => { asked.push(p); return p === root ? p : null; };
+  assert.deepEqual(B.commaReading(root + ',' + unc, 'win32', seam), { entries: [root, unc] });
+  assert.ok(!asked.some((p) => B.isNetworkText(p, 'win32')), 'no network piece looked up');
+});
+
 test('isAbsoluteFor: a Windows path needs a drive or a UNC start; POSIX needs a leading slash', () => {
   const BS = String.fromCharCode(92);
   assert.equal(B.isAbsoluteFor('C:' + BS + 'x', 'win32'), true);
@@ -106,23 +159,152 @@ test('T-1 / 9.10: the root is the real path of CLAUDE_PROJECT_DIR, else of the s
   assert.deepEqual(B.resolveRoot({ env: { CLAUDE_PROJECT_DIR: path.join(b, 'missing') }, cwd: proj }), { refused: B.REASONS.PROJECT_DIR_MISSING });
 });
 
-test('9.1 e list arrival: an array, a JSON-array text, and the same paths joined by commas or new lines give the same entries', () => {
+test('live check 6 (unit): given a subfolder of a git project as CLAUDE_PROJECT_DIR or as the start folder, resolveRoot binds that subfolder and never walks up to the git top (the server\'s own view is not observed here)', () => {
+  const b = base('subfolder');
+  const top = mk(b, 'repo');
+  mk(top, '.git');
+  const start = mk(top, 'sub', 'deeper');
+  // Live (2.1.329): CLAUDE_PROJECT_DIR holds the start folder; the start folder is the fallback.
+  assert.deepEqual(B.resolveRoot({ env: { CLAUDE_PROJECT_DIR: start }, cwd: start }), { rootReal: start, source: 'project_dir' });
+  assert.deepEqual(B.resolveRoot({ env: {}, cwd: start }), { rootReal: start, source: 'start_folder' });
+  // Listing the git top does not enable the subfolder session (exact match, 9.1 c).
+  assert.equal(B.projectSwitch(start, JSON.stringify([top])).enabled, false);
+  assert.equal(B.projectSwitch(start, JSON.stringify([top, start])).enabled, true);
+});
+
+test('9.1 e list arrival: an array, a JSON-array text, and the same paths joined by new lines or by commas give the same entries', () => {
   const b = base('lists');
   const p = [mk(b, 'one'), mk(b, 'two'), mk(b, 'three')];
-  for (const raw of [p, JSON.stringify(p), p.join(','), p.join('\n'), p.join('\r\n')]) {
+  // Joined by commas: every piece is an existing folder and the whole text is not one, so it is the list.
+  for (const raw of [p, JSON.stringify(p), p.join('\n'), p.join('\r\n'), p.join(','), p.join(', ')]) {
     for (const root of p) assert.equal(B.projectSwitch(root, raw).enabled, true, JSON.stringify(raw).slice(0, 40));
     assert.equal(B.projectSwitch(mk(b, 'four'), raw).enabled, false);
+    assert.equal(B.projectSwitch(p[0], raw).listRefused, false);
   }
 });
 
-test('T-1 / 9.1 e: a joined list with a piece that is not absolute (a folder path holding a comma) is refused whole', () => {
+test('9.1 e (real folders): two existing folders as a comma list -> both bound', () => {
+  const b = base('two');
+  const one = mk(b, 'one');
+  const two = mk(b, 'two');
+  for (const root of [one, two]) {
+    const r = B.projectSwitch(root, one + ',' + two);
+    assert.deepEqual([r.listRefused, r.enabled, r.bad], [false, true, 0]);
+  }
+});
+
+test('9.1 e (real folders): a folder whose name holds a comma, given alone -> bound as one path', () => {
   const b = base('comma');
   const withComma = mk(b, 'a,b');
-  const r = B.projectSwitch(withComma, [withComma].join(','));
-  assert.equal(r.listRefused, true);
-  assert.equal(r.enabled, false);
-  // The same path as one array element is one entry and is fine.
-  assert.equal(B.projectSwitch(withComma, JSON.stringify([withComma])).enabled, true);
+  for (const raw of [withComma, ' ' + withComma + ' ', JSON.stringify([withComma]), [withComma]]) {
+    const r = B.projectSwitch(withComma, raw);
+    assert.deepEqual([r.listRefused, r.enabled, r.bad], [false, true, 0], JSON.stringify(raw));
+  }
+  // The split reading (`<b>/a` and `b`) does not exist, so nothing else is bound.
+  assert.deepEqual(B.commaReading(withComma, process.platform), { entries: [withComma] });
+});
+
+test('9.1 e (real folders): neither reading existing -> the whole option refused, no path text in the reason', () => {
+  const b = base('neither');
+  const one = mk(b, 'one');
+  const cases = [
+    path.join(b, 'gone') + ',' + path.join(b, 'away'),
+    path.join(b, 'with,missing'),
+    one + ',' + path.join(b, 'missing'), // one piece exists, the other does not, and the whole is no folder
+    one + ',relative',
+  ];
+  for (const raw of cases) {
+    const r = B.projectSwitch(one, raw);
+    assert.deepEqual([r.listRefused, r.enabled], [true, false], raw);
+  }
+  // One fixed reason for every refusal: it names both causes (a missing or relative listed
+  // folder, and a comma that may be part of a path) and holds no path text.
+  const reason = B.REASONS.LIST_UNSAFE;
+  assert.ok(!reason.includes(path.sep) && !reason.includes('/') && !reason.includes(path.win32.sep));
+  assert.match(reason, /missing/);
+  assert.match(reason, /comma/);
+});
+
+// A = <s>/w/a and Bp = <s>/b; the raw text A + ',' + Bp is also, as one path, the folder
+// <Bp without its root> inside `<s>/w/a,`. Only POSIX can create that folder (a Windows
+// name cannot hold the drive colon), so Windows runs the list and neither setups and skips
+// the one-path and both setups, which the seam test below covers on every OS.
+function wabSetup(b, name, { list, one }) {
+  const s = mk(b, name);
+  const A = path.join(s, 'w', 'a');
+  const Bp = path.join(s, 'b');
+  const raw = A + ',' + Bp;
+  if (list) { mk(A); mk(Bp); }
+  if (one) fs.mkdirSync(raw, { recursive: true });
+  return { A, Bp, raw };
+}
+
+test('9.1 e (real folders): the `/w/a,/b` shape, list only and neither', () => {
+  const b = base('wab');
+  const l = wabSetup(b, 'list', { list: true });
+  assert.equal(B.projectSwitch(fs.realpathSync.native(l.A), l.raw).enabled, true);
+  assert.equal(B.projectSwitch(fs.realpathSync.native(l.Bp), l.raw).enabled, true);
+  const n = wabSetup(b, 'neither', {});
+  assert.equal(B.projectSwitch(mk(b, 'root'), n.raw).listRefused, true);
+});
+
+test('9.1 e (real folders): the `/w/a,/b` shape, one path only and both', {
+  skip: IS_WIN ? 'a Windows folder name cannot hold the drive colon; the seam test covers these setups' : false,
+}, () => {
+  const b = base('wab1');
+  const o = wabSetup(b, 'one', { one: true });
+  const oneReal = fs.realpathSync.native(o.raw);
+  const ro = B.projectSwitch(oneReal, o.raw);
+  assert.deepEqual([ro.listRefused, ro.enabled], [false, true]);
+  const both = wabSetup(b, 'both', { list: true, one: true });
+  for (const root of [both.A, both.Bp, both.raw]) {
+    const r = B.projectSwitch(fs.realpathSync.native(root), both.raw);
+    assert.deepEqual([r.listRefused, r.enabled], [true, false]);
+  }
+});
+
+test('9.1 e (seam): `/w/a,/b` and Windows-style comma values are read by what exists, POSIX and Windows alike', () => {
+  const BS = String.fromCharCode(92);
+  const W = (...parts) => parts.join(BS);
+  const fakeFs = (folders) => (p) => (folders.includes(p) ? p : null);
+  const REFUSED = { refused: true };
+  for (const platform of ['linux', 'darwin']) {
+    const raw = '/w/a,/b';
+    assert.deepEqual(B.commaReading(raw, platform, fakeFs(['/w/a', '/b'])), { entries: ['/w/a', '/b'] }, 'list only');
+    assert.deepEqual(B.commaReading(raw, platform, fakeFs(['/w/a,/b'])), { entries: ['/w/a,/b'] }, 'one path only');
+    assert.deepEqual(B.commaReading(raw, platform, fakeFs(['/w/a', '/b', '/w/a,/b'])), REFUSED, 'both');
+    assert.deepEqual(B.commaReading(raw, platform, fakeFs([])), REFUSED, 'neither');
+    assert.deepEqual(B.commaReading(raw, platform, fakeFs(['/w/a'])), REFUSED, 'list partly');
+    assert.deepEqual(B.commaReading(' /w/a, /b ', platform, fakeFs(['/w/a', '/b'])), { entries: ['/w/a', '/b'] }, 'spaces trimmed');
+    assert.deepEqual(B.commaReading('w/a,/b', platform, fakeFs(['/b', 'w/a', 'w/a,/b'])), REFUSED, 'relative: neither reading is absolute');
+  }
+  // Windows: a drive-letter list, a UNC piece, and a folder name holding a comma.
+  const drives = W('C:', 'w', 'a') + ',' + W('D:', 'b');
+  const unc = W('C:', 'w', 'a') + ',' + BS + BS + W('srv', 'b');
+  const named = W('C:', 'w', 'a,b');
+  assert.deepEqual(B.commaReading(drives, 'win32', fakeFs([W('C:', 'w', 'a'), W('D:', 'b')])), { entries: [W('C:', 'w', 'a'), W('D:', 'b')] });
+  assert.deepEqual(B.commaReading(drives, 'win32', fakeFs([W('C:', 'w', 'a')])), REFUSED);
+  assert.deepEqual(B.commaReading(unc, 'win32', fakeFs([W('C:', 'w', 'a'), BS + BS + W('srv', 'b')])), { entries: [W('C:', 'w', 'a'), BS + BS + W('srv', 'b')] });
+  assert.deepEqual(B.commaReading(unc, 'win32', fakeFs([unc])), { entries: [unc] });
+  assert.deepEqual(B.commaReading(unc, 'win32', fakeFs([unc, W('C:', 'w', 'a'), BS + BS + W('srv', 'b')])), REFUSED);
+  assert.deepEqual(B.commaReading(named, 'win32', fakeFs([named])), { entries: [named] });
+  assert.deepEqual(B.commaReading(named, 'win32', fakeFs([])), REFUSED);
+  // A UNC entry chosen by the list reading still meets the refused-location rule later (SR-4 f).
+  assert.equal(B.refusedRoot(BS + BS + W('srv', 'b'), { platform: 'win32' }), B.REASONS.NETWORK);
+  // A seam that throws counts as "does not exist"; the other piece is still looked at.
+  assert.deepEqual(B.commaReading('/w/a,/b', 'linux', (p) => { if (p === '/w/a') throw new Error('x'); return p === '/b' ? p : null; }), REFUSED);
+});
+
+test('9.1 e: a value with no comma, an array and a JSON-array text are not read by the comma rule', () => {
+  const b = base('nocomma');
+  const one = mk(b, 'one');
+  // New lines only: refused whole when a piece is not absolute, as before.
+  assert.equal(B.projectSwitch(one, one + '\nrelative').listRefused, true);
+  assert.equal(B.projectSwitch(one, one + '\n' + path.join(b, 'missing')).enabled, true, 'a missing piece is counted, not refused');
+  // An array or a JSON-array text: one entry per element, a missing element counted as bad.
+  const r = B.projectSwitch(one, JSON.stringify([one, path.join(b, 'x,missing')]));
+  assert.deepEqual([r.listRefused, r.enabled, r.bad], [false, true, 1]);
+  assert.equal(B.projectSwitch(one, [one, 'relative,x']).listRefused, false);
 });
 
 test('bad_project_entry (9.1 a, b): one relative, one empty and one unresolvable entry count 3; a valid fourth still enables its project', () => {
@@ -190,6 +372,14 @@ test('T-8 (unit): install mode by the 6.7 rule', () => {
   assert.equal(m.mode, 'copy');
   assert.equal(m.dataRoot, kitData);
   assert.equal(m.pluginDataIgnored, false);
+  assert.equal(m.sourceFolder, false, 'a copy-by-hand kit folder holds no plugin manifest');
+  // 6.7 source-folder rule: a plugin folder run from outside the cache (a local-folder install).
+  const srcServer = path.join(mk(b, 'clone', 'src', 'search', 'server'), 'server.cjs');
+  fs.writeFileSync(srcServer, '');
+  fs.writeFileSync(path.join(mk(b, 'clone', 'src', 'search', '.claude-plugin'), 'plugin.json'), '{}');
+  m = B.installMode({ env: { CLAUDE_CONFIG_DIR: cfg, CLAUDE_PLUGIN_DATA: data }, serverFile: srcServer, home });
+  assert.equal(m.mode, 'copy');
+  assert.equal(m.sourceFolder, true);
 
   const env = { CLAUDE_CONFIG_DIR: cfg, CLAUDE_CODE_PLUGIN_CACHE_DIR: cache };
   m = B.installMode({ env: { ...env, CLAUDE_PLUGIN_DATA: data }, serverFile: pluginServer, home });

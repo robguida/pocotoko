@@ -147,6 +147,72 @@ test('T-13 / SR-21 with no seams: the real entry file, started directly inside t
   assert.ok(!fs.existsSync(path.join(kit.dataRoot, 'indexes')), 'nothing written');
 });
 
+// A plugin source folder like this repo's own src/search/: server/, data/search-config.json
+// listing the project, and (unless manifest is false) .claude-plugin/plugin.json.
+function makeSourceFolder(run, { git, manifest = true }) {
+  const topDir = path.join(run.base, 'clone');
+  const pluginDir = path.join(topDir, 'src', 'search');
+  const serverFile = H.copyServer(path.join(pluginDir, 'server'));
+  if (manifest) {
+    fs.mkdirSync(path.join(pluginDir, '.claude-plugin'));
+    fs.copyFileSync(path.join(H.SERVER_SRC, '..', '.claude-plugin', 'plugin.json'), path.join(pluginDir, '.claude-plugin', 'plugin.json'));
+  }
+  fs.mkdirSync(path.join(pluginDir, 'data'));
+  fs.writeFileSync(path.join(pluginDir, 'data', 'search-config.json'), JSON.stringify({ projects: [run.proj] }));
+  if (git) fs.mkdirSync(path.join(topDir, '.git'));
+  return { topDir, pluginDir, serverFile };
+}
+
+test('6.7 / 9.6 e: a local-folder install (a plugin source folder run from outside the plugin cache) binds nothing and writes nothing, in a git clone and outside any', async () => {
+  for (const git of [true, false]) {
+    const run = H.makeBase('srcdir-' + (git ? 'git' : 'plain'), NOTES);
+    const src = makeSourceFolder(run, { git });
+    const pdata = path.join(run.base, 'pdata');
+    fs.mkdirSync(pdata);
+    const beforeTop = H.listingKey(src.topDir);
+    const beforeProj = H.listingKey(run.proj);
+    const env = H.childEnv(run, { CLAUDE_PROJECT_DIR: run.proj, CLAUDE_PLUGIN_DATA: pdata, CLAUDE_PLUGIN_ROOT: src.pluginDir });
+    const c = H.start({ serverFile: src.serverFile, env, cwd: run.proj, seams: { gitCeiling: run.base, globalExcludes: null } });
+    try {
+      const s = await statusOf(c);
+      assert.equal(s.install_mode, 'copy-by-hand', 'git ' + git);
+      assert.equal(s.state, 'off');
+      assert.equal(s.reason, S.LINES.SOURCE_FOLDER);
+      assert.equal(s.bound_folder, null);
+      assert.ok(s.warnings.includes(S.LINES.PLUGIN_DATA_IGNORED));
+      const p = await searchOf(c);
+      assert.deepEqual([p.state, p.reason], ['off', S.LINES.SOURCE_FOLDER]);
+      const g = H.payloadOf(await c.call('get', { id: '0'.repeat(24) }), NOTICE);
+      assert.deepEqual([g.state, g.reason], ['off', S.LINES.SOURCE_FOLDER]);
+    } finally {
+      await c.close();
+    }
+    assert.equal(H.listingKey(src.topDir), beforeTop, 'nothing written in the source folder or its clone');
+    assert.equal(H.listingKey(run.proj), beforeProj, 'nothing written in the project');
+    assert.deepEqual(fs.readdirSync(pdata), [], 'nothing written in the plugin data folder');
+  }
+});
+
+test('6.7 / SR-21: the same source folder without a manifest, inside a git clone -> the git-work-tree check refuses it: the "inside a git repo" line and nothing written', async () => {
+  const run = H.makeBase('srcdir-nomanifest', NOTES);
+  const src = makeSourceFolder(run, { git: true, manifest: false });
+  const beforeTop = H.listingKey(src.topDir);
+  const env = H.childEnv(run, { CLAUDE_PROJECT_DIR: run.proj, CLAUDE_PLUGIN_ROOT: src.pluginDir });
+  const c = H.start({ serverFile: src.serverFile, env, cwd: run.proj, seams: { gitCeiling: run.base, globalExcludes: null } });
+  try {
+    await c.initialize();
+    const s = await H.waitFresh(c);
+    assert.equal(s.install_mode, 'copy-by-hand');
+    assert.equal(s.state, 'off');
+    assert.equal(s.reason, ST.IN_GIT_LINE);
+    assert.equal((await searchOf(c)).reason, ST.IN_GIT_LINE);
+  } finally {
+    await c.close();
+  }
+  assert.equal(H.listingKey(src.topDir), beforeTop, 'nothing written in the clone');
+  assert.ok(!fs.existsSync(path.join(src.pluginDir, 'data', 'indexes')));
+});
+
 test('T-13 / SR-20: the index folder is the first 16 hex of the SHA-256 of the root real path; no file or folder name under the data root holds the project name or path', async () => {
   const { run, kit, c } = await H.setup('t13-name', NOTES);
   try {
@@ -234,7 +300,7 @@ test('T-1 / 9.1: a project not on the list -> no indexes folder, "not enabled fo
   assert.deepEqual(fs.readFileSync(cfgFile), before);
 });
 
-test('T-1 / 9.1 e (plugin mode): a comma-joined projects value with a piece that is not absolute refuses the whole option', async () => {
+test('T-1 / 9.1 e (plugin mode): a folder whose name holds a comma, given alone as the projects value, is bound as one path', async () => {
   const run = H.makeBase('t1-comma', NOTES);
   const comma = path.join(run.base, 'with,comma');
   fs.mkdirSync(comma);
@@ -242,15 +308,43 @@ test('T-1 / 9.1 e (plugin mode): a comma-joined projects value with a piece that
   const kit = H.makeKit(run, { mode: 'plugin', options: { projects: [comma] } });
   const c = startOn(run, kit, { CLAUDE_PROJECT_DIR: comma }, { cwd: comma });
   try {
-    const s = await statusOf(c);
-    assert.equal(s.reason, B.REASONS.LIST_UNSAFE);
-    assert.equal((await searchOf(c)).state, 'off');
+    await c.initialize();
+    const s = await H.waitFresh(c);
+    assert.equal(s.state, 'fresh');
+    assert.ok((await searchOf(c)).results.length > 0);
   } finally {
     await c.close();
   }
 });
 
-test('plugin mode: a never-set option arrives as an empty value and the default applies; lists arrive comma-joined', async () => {
+test('T-1 / 9.1 e (plugin mode): two existing folders as a comma list are both bound; a comma value where neither reading exists refuses the whole option', async () => {
+  const run = H.makeBase('t1-comma-list', NOTES);
+  const other = path.join(run.base, 'other');
+  fs.mkdirSync(other);
+  const kit = H.makeKit(run, { mode: 'plugin', options: { projects: [other, run.proj] } });
+  const c = startOn(run, kit);
+  try {
+    await c.initialize();
+    const s = await H.waitFresh(c);
+    assert.equal(s.state, 'fresh');
+    assert.ok((await searchOf(c)).results.length > 0);
+  } finally {
+    await c.close();
+  }
+  // run.proj exists but the other two pieces do not, and the whole text is no folder: neither reading fully exists.
+  const bad = H.makeKit(run, { mode: 'plugin', options: { projects: [path.join(run.base, 'zqgonezq'), run.proj, path.join(run.base, 'zqawayzq')] } });
+  const c2 = startOn(run, bad);
+  try {
+    const s = await statusOf(c2);
+    assert.equal(s.reason, B.REASONS.LIST_UNSAFE);
+    assert.ok(!/zqgonezq|zqawayzq/.test(JSON.stringify(s)), 'no path text in status');
+    assert.equal((await searchOf(c2)).state, 'off');
+  } finally {
+    await c2.close();
+  }
+});
+
+test('plugin mode: an empty value (the simulated arrival of a never-set option) gives the default; a comma-separated list is read as entries', async () => {
   const run = H.makeBase('pm-opts', NOTES);
   const kit = H.makeKit(run, { mode: 'plugin', options: { projects: [run.proj] } });
   const empty = {};

@@ -79,13 +79,6 @@
       "min": 1024,
       "max": 4194304,
       "required": false
-    },
-    "node_path": {
-      "type": "string",
-      "title": "Node program",
-      "description": "The Node program used to launch the search server. An absolute path to a real Node program is the safe setting on Windows. The default is node.",
-      "default": "node",
-      "required": false
     }
   }
 }

@@ -120,7 +120,9 @@ const UNSET_PLACEHOLDER_RE = /^\$\{user_config\.[A-Za-z0-9_]{1,64}\}$/;
 function isUnsetValue(raw) {
   if (raw === undefined || raw === null) return true;
   if (typeof raw !== 'string') return false;
-  // SEAM(check 5): whether a never-set option reaches the server as an empty string or as the raw `${user_config.KEY}` text; both are treated as unset (the option's default) until the live probe says which.
+  // Live check 5 (Claude Code 2.1.329): a never-set option is not stored and reads back
+  // as empty, even when it has a default. An empty value and the raw `${user_config.KEY}`
+  // text both mean "never set", so the code default applies whichever form arrives.
   return raw.trim() === '' || UNSET_PLACEHOLDER_RE.test(raw.trim());
 }
 
@@ -133,7 +135,12 @@ function splitListOption(raw) {
   if (isUnsetValue(raw)) return { entries: [], joined: false };
   if (Array.isArray(raw)) return { entries: raw.map((v) => (typeof v === 'string' ? v : String(v))), joined: false };
   const s = String(raw);
-  // SEAM(check 5): how a `multiple` string option arrives; default accepts a JSON array text, else splits one string on commas and new lines (9.1 e, 9.13). The live answer may pin this to one form.
+  // SEAM(check 5): live probe (Claude Code 2.1.329): `plugin configure --values-stdin` stores
+  // the single-line text it is given as written (a comma list or a JSON-array text); a real
+  // array and new lines are refused. What a set list looks like AFTER substitution into the
+  // server's env was not seen, so this stays open until the re-probe or B9. Environment
+  // values are always strings: a string is read as a JSON-array text, else split on commas
+  // and new lines (9.1 e, 9.13). The array branch serves callers that do not read the env.
   const parsed = parseJsonArray(s);
   if (parsed) return { entries: parsed, joined: false };
   return { entries: s.split(/[,\r\n]/).map((v) => v.trim()).filter((v) => v !== ''), joined: true };
