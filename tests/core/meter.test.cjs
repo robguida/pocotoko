@@ -638,6 +638,27 @@ test('6.7 / SR-C2 / SR-C7: a pre-planted link at the temp name is not followed; 
   assert.throws(() => M.atomicWrite({ dir: outside, expectedDir: outside, rootReal: dir, name: 's.json', data: 'x' }), (e) => e.code === 'outside_state_root');
 });
 
+test('6.7 / SR-C2 / SR-C7: the folder is checked again right before the rename: a state folder swapped for a junction after the temp file is written is refused; a file planted at the temp name outside is not renamed to the target there', () => {
+  const b = H.makeBase('rename-swap');
+  const root = H.mk(b.base, 'root');
+  const dir = H.mk(root, 'state');
+  const outside = H.mk(b.base, 'outside');
+  fs.writeFileSync(path.join(outside, 'keep.txt'), 'keep');
+  // A file planted in the outside folder under the exact temp name the write will use:
+  // a rename through the swapped folder would turn it into outside/s.json.
+  const tmpName = 's.json.1.0123456789abcdef.tmp';
+  fs.writeFileSync(path.join(outside, tmpName), 'planted');
+  const swap = () => {
+    fs.renameSync(dir, dir + '-moved');
+    H.dirLink(outside, dir);
+  };
+  assert.throws(() => M.atomicWrite({ dir, expectedDir: dir, rootReal: root, name: 's.json', data: 'x', _tempName: tmpName, _beforeRename: swap }), (e) => /^folder_/.test(e.code));
+  assert.equal(fs.existsSync(path.join(outside, 's.json')), false, 'nothing renamed into the outside folder');
+  assert.deepEqual(fs.readdirSync(outside).sort(), ['keep.txt', tmpName].sort());
+  assert.equal(fs.readFileSync(path.join(outside, tmpName), 'utf8'), 'planted', 'the planted file is not unlinked either');
+  fs.rmSync(dir, { recursive: false, force: true });
+});
+
 test('6.7 / SR-C3: pruning removes only old exact session files; config, notes, other names, a folder and a link named like a session file are left (the link target untouched); the 14-day boundary', () => {
   const b = H.makeBase('prune');
   const kit = H.copyKit(b);
@@ -741,6 +762,36 @@ test('6.7 / SR-C2 / SR-C3: temp cleanup and pruning check their own folder: a li
   assert.equal(M.pruneSessions(path.join(b.base, 'linked-root', '..', 'linked-root'), {}).removed, 0);
   assert.deepEqual(H.listing(outside), before, 'nothing deleted');
   assert.deepEqual(M.checkedFolder(outside, ['sessions']), { dir: outSessions });
+});
+
+test('6.7 / SR-C7: temp cleanup removes only temp names of the files the meter writes in that folder; a user file with a temp-like name for another base survives', () => {
+  const b = H.makeBase('tempbase');
+  const kit = H.copyKit(b);
+  const hex = () => crypto.randomBytes(8).toString('hex');
+  const tempOf = (base) => base + '.' + (1000 + crypto.randomInt(1000)) + '.' + hex() + '.tmp';
+  const folders = {
+    config: { own: tempOf('meter-config.json'), user: [tempOf('notes.json'), tempOf('meter.cjs')] },
+    'state/sessions': { own: tempOf('aaaa.json'), user: [tempOf('Notes.json'), tempOf('meter.cjs')] },
+    statusline: { own: tempOf('meter.cjs'), user: [tempOf('meter-config.json'), tempOf('helper.cjs')] },
+  };
+  for (const [rel, f] of Object.entries(folders)) {
+    const dir = H.mk(kit.stateRoot, ...rel.split('/'));
+    for (const n of [f.own, ...f.user]) {
+      fs.writeFileSync(path.join(dir, n), 'x');
+      H.setMtime(path.join(dir, n), 60 * 60 * 1000);
+    }
+    const r = M.cleanTemps(kit.stateRoot, rel.split('/'));
+    assert.equal(r.removed, 1, rel);
+    assert.deepEqual(fs.readdirSync(dir).sort(), [...f.user].sort(), rel);
+  }
+  // A folder the meter writes no temp files in: nothing is removed.
+  const handoff = H.mk(kit.stateRoot, 'handoff');
+  const stray = tempOf('aaaa.json');
+  fs.writeFileSync(path.join(handoff, stray), 'x');
+  H.setMtime(path.join(handoff, stray), 60 * 60 * 1000);
+  const r = M.cleanTemps(kit.stateRoot, ['handoff']);
+  assert.deepEqual({ removed: r.removed, refused: r.refused }, { removed: 0, refused: 'not_own_folder' });
+  assert.deepEqual(fs.readdirSync(handoff), [stray]);
 });
 
 test('6.7: the git-work-tree check fails closed: a .git probe error other than not-found counts as found; ENOENT and ENOTDIR keep walking up', () => {

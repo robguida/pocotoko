@@ -21,8 +21,9 @@ const O_DIRECTORY = C.O_DIRECTORY || 0;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 const TEMP_MAX_AGE_MS = 10 * 60 * 1000;
-// <name>.<pid>.<16 hex>.tmp, where <name> is one of the store's own file names.
-const TEMP_NAME_RE = /^[A-Za-z0-9_-]{1,40}(?:\.[A-Za-z0-9_-]{1,10})?\.[0-9]{1,10}\.[0-9a-f]{16}\.tmp$/;
+// <name>.<pid>.<16 hex>.tmp; group 1 is <name>. cleanTemps removes a match only
+// when <name> is one of the base names the caller lists for that folder.
+const TEMP_NAME_RE = /^([A-Za-z0-9_-]{1,40}(?:\.[A-Za-z0-9_-]{1,10})?)\.[0-9]{1,10}\.[0-9a-f]{16}\.tmp$/;
 
 class FsxError extends Error {
   constructor(code) {
@@ -102,10 +103,37 @@ function folderProblem(dir, expected, platform = process.platform) {
 }
 
 /**
+ * The folder `<rootReal>/<parts...>` checked before it is listed or changed:
+ * the root itself (parts empty) or a folder strictly inside it, not a link,
+ * with a real path equal to the built path. So a link or junction at the
+ * folder or at any parent up to and including the root is refused (a root
+ * that is not its own real path fails the same way). Returns { dir } or
+ * { problem }.
+ */
+function checkedFolder(rootReal, parts, platform = process.platform) {
+  if (typeof rootReal !== 'string' || rootReal === '' || !Array.isArray(parts)) return { problem: 'bad_path' };
+  if (!pathApi(platform).isAbsolute(rootReal)) return { problem: 'bad_path' };
+  const dir = parts.length ? path.join(rootReal, ...parts) : rootReal;
+  if (parts.length && (!isInside(dir, rootReal, platform) || samePath(dir, rootReal, platform))) return { problem: 'outside_root' };
+  const why = folderProblem(dir, dir, platform);
+  return why ? { problem: why } : { dir };
+}
+
+/** True when name is one plain path part (no separator, not `.` or `..`). */
+function plainName(name) {
+  return typeof name === 'string' && name !== '' && name !== '.' && name !== '..' && !/[\\/]/.test(name);
+}
+
+/**
  * Create (if missing) the folder `name` inside the real folder `parentReal`,
- * mode 0700 set explicitly on POSIX, then check it. Returns its path.
+ * mode 0700 set explicitly on POSIX, then check it. The parent is checked
+ * first, so nothing is created through a parent swapped for a link or
+ * junction. Returns its path.
  */
 function ensureDir(parentReal, name, platform = process.platform) {
+  if (!plainName(name)) throw new FsxError('bad_name');
+  const pwhy = folderProblem(parentReal, parentReal, platform);
+  if (pwhy) throw new FsxError('folder_' + pwhy);
   const dir = path.join(parentReal, name);
   try {
     fs.mkdirSync(dir, { mode: DIR_MODE });
@@ -196,8 +224,10 @@ function tempNameFor(name) {
  * Write `data` to `<dir>/<name>` atomically. Before writing: lstat the folder,
  * refuse a link, refuse a real path that differs from `expectedDir`. The temp
  * file is created exclusively (`wx`, 0600, O_NOFOLLOW where the OS has it),
- * fsynced, then renamed over the target. On any failure after the temp file
- * exists, it is unlinked before the error is thrown.
+ * fsynced, the folder is checked again, then the temp file is renamed over the
+ * target. On any failure after the temp file exists, it is unlinked before the
+ * error is thrown, only through a folder that still passes the check (a
+ * swapped folder's temp file is left where it is).
  *
  * opts.beforeRename: called after fsync; returning false aborts (lock lost).
  * opts._tempName / opts._failAfterTemp: test-only seams.
@@ -223,12 +253,17 @@ function atomicWrite({ dir, expectedDir, name, data, beforeRename, platform = pr
     fs.closeSync(fd);
     fd = null;
     if (beforeRename && beforeRename() === false) throw new FsxError('lock_lost');
+    // The folder is checked again right before the rename.
+    const again = folderProblem(dir, expectedDir || dir, platform);
+    if (again) throw new FsxError('folder_' + again);
     fs.renameSync(tmp, path.join(dir, name));
     created = false;
     fsyncDir(dir, platform);
   } catch (err) {
     if (fd !== null) try { fs.closeSync(fd); } catch (_) { /* ignore */ }
-    if (created) try { fs.unlinkSync(tmp); } catch (_) { /* gone already */ }
+    // The temp file is unlinked only through a folder that still passes the check
+    // (a swapped folder leaves it in the real folder, out of reach).
+    if (created && !folderProblem(dir, expectedDir || dir, platform)) try { fs.unlinkSync(tmp); } catch (_) { /* gone already */ }
     if (err instanceof FsxError) throw err;
     throw new FsxError('write_failed');
   }
@@ -238,27 +273,39 @@ function atomicWrite({ dir, expectedDir, name, data, beforeRename, platform = pr
 // Leftover temp files (SR-24, SR-49 a)
 
 /**
- * Remove this server's own leftover temp files from one folder: exact temp
- * name pattern only, regular files only (a link is skipped, never followed),
- * older than maxAgeMs by modified time (0 = any age). Never recursive. One
- * failing entry never stops the rest.
+ * Remove this server's own leftover temp files from the folder
+ * `<rootReal>/<parts...>`, checked by checkedFolder before it is listed and
+ * again before each delete; a refused folder is not listed (`refused` names
+ * why). Only names of the exact temp pattern whose base name is in `bases`
+ * (the files the server writes in that folder), regular files only (a link is
+ * skipped, never followed), older than maxAgeMs by modified time (0 = any
+ * age). No bases → nothing removed. Never recursive. One failing entry never
+ * stops the rest. _unlink: test-only seam.
  */
-function cleanTemps(dir, { maxAgeMs = TEMP_MAX_AGE_MS, now = Date.now() } = {}) {
-  const out = { removed: 0, kept: 0, failed: 0 };
+function cleanTemps(rootReal, parts, { bases = [], maxAgeMs = TEMP_MAX_AGE_MS, now = Date.now(), platform = process.platform, _unlink = fs.unlinkSync } = {}) {
+  const out = { removed: 0, kept: 0, failed: 0, refused: null };
+  const c = checkedFolder(rootReal, parts, platform);
+  if (c.problem) { out.refused = c.problem; return out; }
+  const own = new Set(Array.isArray(bases) ? bases : []);
+  if (!own.size) return out;
+  const dir = c.dir;
   let names;
   try {
     names = fs.readdirSync(dir);
   } catch (_) {
+    out.refused = 'unreadable';
     return out;
   }
   for (const n of names) {
-    if (!TEMP_NAME_RE.test(n)) continue;
+    const m = TEMP_NAME_RE.exec(n);
+    if (!m || !own.has(m[1])) continue;
     try {
       const p = path.join(dir, n);
       const st = fs.lstatSync(p);
       if (st.isSymbolicLink() || !st.isFile()) { out.kept++; continue; }
       if (maxAgeMs > 0 && now - st.mtimeMs < maxAgeMs) { out.kept++; continue; }
-      fs.unlinkSync(p);
+      if (folderProblem(dir, dir, platform)) { out.failed++; continue; }
+      _unlink(p);
       out.removed++;
     } catch (_) {
       out.failed++;
@@ -293,8 +340,12 @@ function permProblem(st, wantMode, uid) {
  * `indexes/`, each index folder, and the files directly inside those folders.
  * Each must be owned by the current user with no group or other bits. A loose
  * item is tightened once (through a no-follow handle) and checked again. Links
- * are skipped. Nothing outside the data root is touched. Never recursive
- * beyond that fixed shape.
+ * are skipped. Each folder is checked (checkedFolder, from the data root's
+ * real path) before it is listed, and the folder holding an item is checked
+ * again right before the item is tightened, so nothing is listed or changed
+ * through a link or junction; a folder that fails (other than missing) is a
+ * problem. Nothing outside the data root is touched. Never recursive beyond
+ * that fixed shape.
  *
  * Returns { ok, skipped, problems: [code], tightened }.
  * opts.uid: test-only seam for the owner check.
@@ -307,7 +358,8 @@ function checkPermissions(dataRoot, { platform = process.platform, uid } = {}) {
   const problems = [];
   let tightened = 0;
 
-  const visit = (p, isDir) => {
+  // `parts`: the folder itself (isDir) or the folder holding the file, below the data root.
+  const visit = (p, isDir, parts) => {
     let st;
     try { st = fs.lstatSync(p); } catch (_) { return; }
     if (st.isSymbolicLink()) return;
@@ -317,6 +369,7 @@ function checkPermissions(dataRoot, { platform = process.platform, uid } = {}) {
     let why = permProblem(st, want, me);
     if (why === 'loose') {
       try {
+        if (checkedFolder(dataRoot, parts, platform).problem) throw new FsxError('folder_changed');
         chmodNoFollow(p, want, isDir);
         tightened++;
         why = permProblem(fs.lstatSync(p), want, me);
@@ -327,31 +380,37 @@ function checkPermissions(dataRoot, { platform = process.platform, uid } = {}) {
     if (why) problems.push(why);
   };
 
-  const filesIn = (dir) => {
-    let names = [];
-    try { names = fs.readdirSync(dir); } catch (_) { return []; }
-    return names.map((n) => path.join(dir, n));
+  const namesIn = (parts) => {
+    const c = checkedFolder(dataRoot, parts, platform);
+    if (c.problem) {
+      if (c.problem !== 'missing') problems.push('folder_' + c.problem);
+      return [];
+    }
+    try { return fs.readdirSync(c.dir); } catch (_) { return []; }
   };
 
-  visit(dataRoot, true);
-  for (const p of filesIn(dataRoot)) {
+  visit(dataRoot, true, []);
+  for (const n of namesIn([])) {
+    const p = path.join(dataRoot, n);
     let st;
     try { st = fs.lstatSync(p); } catch (_) { continue; }
     if (st.isSymbolicLink()) continue;
-    if (st.isFile()) visit(p, false);
+    if (st.isFile()) visit(p, false, []);
   }
   const indexes = path.join(dataRoot, 'indexes');
-  visit(indexes, true);
-  for (const d of filesIn(indexes)) {
+  visit(indexes, true, ['indexes']);
+  for (const n of namesIn(['indexes'])) {
+    const d = path.join(indexes, n);
     let st;
     try { st = fs.lstatSync(d); } catch (_) { continue; }
     if (st.isSymbolicLink() || !st.isDirectory()) continue;
-    visit(d, true);
-    for (const f of filesIn(d)) {
+    visit(d, true, ['indexes', n]);
+    for (const fn of namesIn(['indexes', n])) {
+      const f = path.join(d, fn);
       let fst;
       try { fst = fs.lstatSync(f); } catch (_) { continue; }
       if (fst.isSymbolicLink() || !fst.isFile()) continue;
-      visit(f, false);
+      visit(f, false, ['indexes', n]);
     }
   }
   return { ok: problems.length === 0, skipped: null, problems, tightened };
@@ -366,6 +425,7 @@ module.exports = {
   isInside,
   samePath,
   folderProblem,
+  checkedFolder,
   ensureDir,
   readRegular,
   readOwnFile,

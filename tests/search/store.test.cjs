@@ -420,7 +420,121 @@ test('SR-25, 9.6 c: emptying the index folder refuses a folder that was swapped 
   assert.equal(store._test.deleteIndexFolder(), false);
   assert.deepEqual(fs.readdirSync(outside), ['keep.txt']);
   assert.equal(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'untouched bytes');
+  assert.equal(store._test.lastDelete.refused, 'link');
   fs.rmSync(dir, { recursive: false, force: true });
+});
+
+test('SR-25: emptying the index folder is never recursive: files and empty folders go, a folder that is not empty is left with its contents and counted', () => {
+  const run = makeRun('delnorec', { 'a.md': '# A\nx\n' });
+  const store = openStore(run);
+  const dir = store.indexDir;
+  for (const n of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, n));
+  fs.writeFileSync(path.join(dir, 'manifest.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'chunks.jsonl'), '');
+  fs.mkdirSync(path.join(dir, 'empty'));
+  fs.mkdirSync(path.join(dir, 'full'));
+  fs.writeFileSync(path.join(dir, 'full', 'inner.txt'), 'kept');
+  assert.equal(store._test.deleteIndexFolder(), true);
+  assert.deepEqual(fs.readdirSync(dir), ['full']);
+  assert.equal(fs.readFileSync(path.join(dir, 'full', 'inner.txt'), 'utf8'), 'kept');
+  assert.deepEqual(store._test.lastDelete, { removed: 3, failed: 0, left: 1, refused: null });
+});
+
+test('SR-25: an index folder swapped for a junction during the delete loop -> refused (false), nothing deleted through it, the moved folder keeps its files', (t) => {
+  const run = makeRun('delswap', { 'a.md': '# A\nx\n' });
+  const store = openStore(run);
+  const dir = store.indexDir;
+  for (const n of fs.readdirSync(dir)) fs.unlinkSync(path.join(dir, n));
+  fs.writeFileSync(path.join(dir, 'manifest.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'chunks.jsonl'), '');
+  const outside = path.join(run.base, 'outside-del');
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'manifest.json'), 'outside bytes');
+  fs.writeFileSync(path.join(outside, 'chunks.jsonl'), 'outside bytes');
+  const orig = X.checkedFolder;
+  let calls = 0;
+  let swapped = false;
+  X.checkedFolder = (...a) => {
+    calls++;
+    if (calls === 2 && !swapped) {
+      // Right after the first check passed and the folder was listed: swap it.
+      fs.renameSync(dir, dir + '-moved');
+      try { fs.symlinkSync(outside, dir, IS_WIN ? 'junction' : 'dir'); swapped = true; } catch (_) { fs.renameSync(dir + '-moved', dir); }
+    }
+    return orig(...a);
+  };
+  let ok;
+  try {
+    ok = store._test.deleteIndexFolder();
+  } finally {
+    X.checkedFolder = orig;
+  }
+  if (!swapped) { t.skip('folder links cannot be made here'); return; }
+  assert.equal(ok, false);
+  assert.equal(store._test.lastDelete.refused, 'link');
+  assert.equal(store._test.lastDelete.removed, 0);
+  assert.equal(store._test.lastDelete.failed, 2);
+  assert.deepEqual(fs.readdirSync(outside).sort(), ['chunks.jsonl', 'manifest.json']);
+  assert.deepEqual(fs.readdirSync(dir + '-moved').sort(), ['chunks.jsonl', 'manifest.json']);
+  fs.rmSync(dir, { recursive: false, force: true });
+});
+
+test('SR-24, SR-49 a: an index folder swapped for a junction after open -> the refresh is off and status shows the folder checks failed; no lock is made, no temp file deleted, nothing written through it', async (t) => {
+  const run = makeRun('swapidx', { 'a.md': '# A\nplain\n' });
+  const store = openStore(run);
+  const dir = store.indexDir;
+  const outside = path.join(run.base, 'outside-index');
+  fs.mkdirSync(outside);
+  const agedTemp = X.tempNameFor('chunks.jsonl');
+  fs.writeFileSync(path.join(outside, agedTemp), 'x');
+  const old = new Date(Date.now() - 60 * 60 * 1000);
+  fs.utimesSync(path.join(outside, agedTemp), old, old);
+  fs.writeFileSync(path.join(outside, 'keep.txt'), 'untouched');
+  fs.renameSync(dir, dir + '-moved');
+  try {
+    fs.symlinkSync(outside, dir, IS_WIN ? 'junction' : 'dir');
+  } catch (_) {
+    t.skip('folder links cannot be made here');
+    return;
+  }
+  const before = fs.readdirSync(outside).sort();
+  const r = await store.refresh();
+  assert.equal(r.off, 'index_folder_link');
+  assert.equal(store.state(), 'off');
+  assert.equal(store.status().folderChecks, 'failed', 'status shows the folder checks failed');
+  assert.deepEqual(fs.readdirSync(outside).sort(), before);
+  assert.equal(store._lock.acquireLock(), false);
+  assert.deepEqual(fs.readdirSync(outside).sort(), before);
+  fs.rmSync(dir, { recursive: false, force: true });
+});
+
+test('SR-21: the git-work-tree check fails closed: a .git probe error other than not-found counts as found; ENOENT and ENOTDIR keep walking up', () => {
+  const run = makeRun('gitprobe', {});
+  const throwing = (code) => () => { const e = new Error(code); e.code = code; throw e; };
+  assert.equal(St.inGitWorkTree(run.proj, run.base, throwing('EACCES')), true);
+  assert.equal(St.inGitWorkTree(run.proj, run.base, throwing('EPERM')), true);
+  assert.equal(St.inGitWorkTree(run.proj, run.base, throwing('EIO')), true);
+  assert.equal(St.inGitWorkTree(run.proj, run.base, throwing('ENOENT')), false);
+  assert.equal(St.inGitWorkTree(run.proj, run.base, throwing('ENOTDIR')), false);
+  assert.equal(St.inGitWorkTree(run.proj, run.base), false);
+});
+
+test('SR-24: temp cleanup in the index folder removes only temp names of manifest.json and chunks.jsonl; a temp-like name for another base survives', async () => {
+  const run = makeRun('tempbase', { 'a.md': '# A\nplain\n' });
+  const s1 = openStore(run);
+  await s1.refresh();
+  const dir = s1.indexDir;
+  const own = X.tempNameFor('manifest.json');
+  const others = [X.tempNameFor('notes.json'), X.tempNameFor('lock'), X.tempNameFor('OFF')];
+  const old = new Date(Date.now() - 60 * 60 * 1000);
+  for (const n of [own, ...others]) {
+    fs.writeFileSync(path.join(dir, n), 'x');
+    fs.utimesSync(path.join(dir, n), old, old);
+  }
+  openStore(run); // open: 10-minute cleanup
+  const left = fs.readdirSync(dir);
+  assert.ok(!left.includes(own));
+  for (const n of others) assert.ok(left.includes(n), n);
 });
 
 test('counts add up: an unparseable .gitignore and a folder that cannot be listed are counted apart from files', async () => {

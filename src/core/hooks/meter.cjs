@@ -72,8 +72,15 @@ const LINES = Object.freeze({
 });
 
 const SESSION_FILE_RE = /^(?:[a-z0-9_-]{1,64}|h-[0-9a-f]{32})\.json$/;
-// <name>.<pid>.<16 hex>.tmp, where <name> is one of this script's own file names.
-const TEMP_NAME_RE = /^[A-Za-z0-9_-]{1,66}\.(?:json|cjs)\.[0-9]{1,10}\.[0-9a-f]{16}\.tmp$/;
+// <name>.<pid>.<16 hex>.tmp; group 1 is <name>. Temp cleanup removes a match only when
+// <name> is a file this script writes in that folder (TEMP_BASES), so a user's own file in
+// a hand-edited copy-by-hand folder is never taken for a temp file.
+const TEMP_NAME_RE = /^([A-Za-z0-9_-]{1,66}\.(?:json|cjs))\.[0-9]{1,10}\.[0-9a-f]{16}\.tmp$/;
+const TEMP_BASES = Object.freeze({
+  'state/sessions': (base) => SESSION_FILE_RE.test(base),
+  config: (base) => base === 'meter-config.json',
+  statusline: (base) => base === 'meter.cjs',
+});
 const RESERVED_DEVICE_RE = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\..*)?$/i;
 
 const C = fs.constants;
@@ -690,13 +697,20 @@ function writeAll(fd, buf) {
  * Write `data` to `<dir>/<name>` atomically (6.7): lstat the folder and refuse a link,
  * refuse a folder outside the state root or whose real path is not `expectedDir`; then a
  * temp file `<name>.<pid>.<random>.tmp` created exclusively, mode 0600, O_NOFOLLOW where the
- * OS has it; fsync; rename over the target. On any failure after the temp file exists, it is
- * unlinked before the error is thrown. _failAfterTemp / _tempName: test-only seams.
+ * OS has it; fsync; the same folder check again right before the rename; rename over the
+ * target. On any failure after the temp file exists, it is unlinked before the error is
+ * thrown, only through a folder that still passes the check (a swapped folder's temp file is
+ * left where it is). _failAfterTemp / _tempName / _beforeRename: test-only seams.
  */
-function atomicWrite({ dir, expectedDir, rootReal, name, data, platform = process.platform, _failAfterTemp, _tempName }) {
-  if (rootReal && !isInside(expectedDir, rootReal, platform)) throw new MeterError('outside_state_root');
-  const why = folderProblem(dir, expectedDir, platform);
-  if (why) throw new MeterError('folder_' + why);
+function atomicWrite({ dir, expectedDir, rootReal, name, data, platform = process.platform, _failAfterTemp, _tempName, _beforeRename }) {
+  // The write folder check: inside the state root, lstat not a link, real path equal to the built path.
+  const writeFolderProblem = () => {
+    if (rootReal && !isInside(expectedDir, rootReal, platform)) return 'outside_state_root';
+    const w = folderProblem(dir, expectedDir, platform);
+    return w ? 'folder_' + w : null;
+  };
+  const why = writeFolderProblem();
+  if (why) throw new MeterError(why);
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
   const tmp = path.join(dir, _tempName || tempNameFor(name));
   let fd = null;
@@ -714,11 +728,16 @@ function atomicWrite({ dir, expectedDir, rootReal, name, data, platform = proces
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = null;
+    if (_beforeRename) _beforeRename();
+    // The folder is checked again right before the rename.
+    const again = writeFolderProblem();
+    if (again) throw new MeterError(again);
     fs.renameSync(tmp, path.join(dir, name));
     created = false;
   } catch (err) {
     if (fd !== null) try { fs.closeSync(fd); } catch (_) { /* ignore */ }
-    if (created) try { fs.unlinkSync(tmp); } catch (_) { /* gone already */ }
+    // The temp file is unlinked only through a folder that still passes the check.
+    if (created && !writeFolderProblem()) try { fs.unlinkSync(tmp); } catch (_) { /* gone already */ }
     if (err instanceof MeterError) throw err;
     throw new MeterError('write_failed');
   }
@@ -741,14 +760,18 @@ function checkedFolder(rootReal, parts, platform = process.platform) {
 /**
  * Remove this script's own leftover temp files from the folder `<rootReal>/<parts...>`,
  * checked by checkedFolder before it is listed and again before each delete; a refused folder
- * is not listed (`refused` names why). Exact temp name pattern only, regular files only (a
- * link is skipped, never followed), older than maxAgeMs by modified time. Never recursive.
- * One failing entry never stops the rest.
+ * is not listed (`refused` names why). Exact temp name pattern only, and only for a base
+ * name this script writes in that folder (TEMP_BASES: session files in state/sessions,
+ * meter-config.json in config, meter.cjs in statusline; any other folder removes nothing).
+ * Regular files only (a link is skipped, never followed), older than maxAgeMs by modified
+ * time. Never recursive. One failing entry never stops the rest.
  */
 function cleanTemps(rootReal, parts, { maxAgeMs = LIMITS.TEMP_MAX_AGE_MS, now = Date.now(), platform = process.platform } = {}) {
   const out = { removed: 0, kept: 0, failed: 0, refused: null };
   const c = checkedFolder(rootReal, parts, platform);
   if (c.problem) { out.refused = c.problem; return out; }
+  const ownBase = Object.prototype.hasOwnProperty.call(TEMP_BASES, parts.join('/')) ? TEMP_BASES[parts.join('/')] : null;
+  if (!ownBase) { out.refused = 'not_own_folder'; return out; }
   const dir = c.dir;
   let names;
   try {
@@ -758,7 +781,8 @@ function cleanTemps(rootReal, parts, { maxAgeMs = LIMITS.TEMP_MAX_AGE_MS, now = 
     return out;
   }
   for (const n of names) {
-    if (!TEMP_NAME_RE.test(n)) continue;
+    const m = TEMP_NAME_RE.exec(n);
+    if (!m || !ownBase(m[1])) continue;
     try {
       const p = path.join(dir, n);
       const st = fs.lstatSync(p);

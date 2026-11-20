@@ -48,6 +48,9 @@ const MANIFEST = 'manifest.json';
 const CHUNKS = 'chunks.jsonl';
 const LOCK = 'lock';
 const OFF_FILE = 'OFF';
+// The only files the store writes through a temp file, and only in the index
+// folder; temp cleanup there removes leftovers of these base names only.
+const INDEX_TEMP_BASES = Object.freeze([MANIFEST, CHUNKS]);
 
 const INCOMPLETE_LINE = 'index incomplete: project over the size cap; narrow it with your exclude options';
 const LARGE_PROJECT_LINE = 'large project';
@@ -114,16 +117,20 @@ function realpathLoose(p) {
 
 /**
  * True when a `.git` file or folder is found in p or any folder above it (6.7).
- * ceiling: test-only seam; the walk up stops after that folder (the tests run
- * inside the repo's own work tree).
+ * Fails closed: a check that fails with anything other than not-found (ENOENT,
+ * ENOTDIR) counts as found, so nothing is written. ceiling: test-only seam; the
+ * walk up stops after that folder (the tests run inside the repo's own work
+ * tree). _lstat: test-only seam.
  */
-function inGitWorkTree(p, ceiling = null) {
-  let cur = p;
+function inGitWorkTree(p, ceiling = null, _lstat = fs.lstatSync) {
+  let cur = path.resolve(p);
   for (;;) {
     try {
-      fs.lstatSync(path.join(cur, '.git'));
+      _lstat(path.join(cur, '.git'));
       return true;
-    } catch (_) { /* keep walking up */ }
+    } catch (err) {
+      if (!(err && (err.code === 'ENOENT' || err.code === 'ENOTDIR'))) return true;
+    }
     if (ceiling && fsx.samePath(cur, ceiling)) return false;
     const up = path.dirname(cur);
     if (up === cur) return false;
@@ -183,7 +190,8 @@ function createStore(opts) {
     lastRun: null,
     warnings: [],
     folderChecks: null,
-    lock: { held: false, lastTouch: 0 },
+    lastDelete: null, // counts of the last index-folder delete: { removed, failed, left, refused }
+    lock:{ held: false, lastTouch: 0 },
     counters: { reads: 0, hashes: 0, scans: 0, writes: 0 },
     indexedAt: null, // when the index in memory was last written (or the loaded manifest's built_at)
   };
@@ -227,11 +235,31 @@ function createStore(opts) {
       st.off = 'folder_checks_failed';
       return false;
     }
-    const now = clock.now();
-    fsx.cleanTemps(st.dataReal, { now });
-    fsx.cleanTemps(path.join(st.dataReal, 'indexes'), { now });
-    fsx.cleanTemps(st.indexDir, { now });
+    // Only the index folder ever holds the store's temp files (SR-24).
+    cleanIndexTemps({ now: clock.now() });
     return true;
+  }
+
+  /** The parts of this project's index folder below the data root. */
+  function indexParts() {
+    return ['indexes', indexFolderName(rootReal)];
+  }
+
+  /**
+   * Null when the index folder still passes the SR-24 folder check (not a link,
+   * real path equal to the path built from the data root's real path); else a
+   * problem code. Run before every list, delete, lock create, lock touch and
+   * lock removal in the folder.
+   */
+  function indexFolderProblem() {
+    if (!st.dataReal || !st.indexDir) return 'not_open';
+    const c = fsx.checkedFolder(st.dataReal, indexParts(), platform);
+    if (c.problem) return c.problem;
+    return fsx.samePath(c.dir, st.indexDir, platform) ? null : 'moved';
+  }
+
+  function cleanIndexTemps(extra) {
+    return fsx.cleanTemps(st.dataReal, indexParts(), { bases: INDEX_TEMP_BASES, platform, ...extra });
   }
 
   function isOff() {
@@ -258,33 +286,58 @@ function createStore(opts) {
    * Empty only this project's index folder (SR-25, 9.6 c). Called only by the
    * lock holder, so it keeps the holder's own lock file. The folder is checked
    * first (a link, a junction or a moved folder is refused, and nothing in it
-   * is touched). Returns true when emptied, false when refused.
+   * is touched), and again before each delete; a check that fails at any
+   * point refuses the delete. Never recursive: a file is unlinked, a link is
+   * removed as a link only, and a folder inside is removed with rmdir only, so
+   * an empty folder (or a junction lstat does not report) goes and a folder
+   * that is not empty is left and counted (the store never creates folders
+   * here). One failing item never stops the rest. The counts
+   * { removed, failed, left, refused } are recorded in st.lastDelete.
+   * Returns true when the folder check held throughout, false when refused.
    */
   function deleteIndexFolder() {
+    const out = { removed: 0, failed: 0, left: 0, refused: null };
+    st.lastDelete = out;
+    const first = indexFolderProblem();
+    if (first) { out.refused = first; return false; }
     const dir = st.indexDir;
-    const expected = path.join(st.dataReal, 'indexes', indexFolderName(rootReal));
-    if (fsx.folderProblem(dir, expected, platform)) return false;
     let names = [];
     try { names = fs.readdirSync(dir); } catch (_) { names = []; }
     for (const n of names) {
       if (n === LOCK && st.lock.held) continue;
       const p = path.join(dir, n);
+      // Checked again before each delete; a failed check refuses the delete,
+      // and no item is touched through that folder.
+      const again = indexFolderProblem();
+      if (again) {
+        if (!out.refused) out.refused = again;
+        out.failed++;
+        continue;
+      }
       try {
         const s = fs.lstatSync(p);
         if (s.isSymbolicLink()) {
           // Only the link itself goes, never its target.
           try { fs.unlinkSync(p); } catch (_) { fs.rmdirSync(p); }
         } else if (s.isDirectory()) {
-          fs.rmSync(p, { recursive: true, force: true });
+          fs.rmdirSync(p); // empty folder or a link in disguise only; never recursive
         } else {
           fs.unlinkSync(p);
         }
-      } catch (_) { /* keep going; a stray entry never stops the reset */ }
+        out.removed++;
+      } catch (err) {
+        if (err && (err.code === 'ENOTEMPTY' || err.code === 'EEXIST')) out.left++;
+        else out.failed++;
+      }
     }
-    return true;
+    return out.refused === null;
   }
 
   function readJsonFile(name) {
+    // Read only through a folder that passes the check; a failed check reads as corrupt.
+    const why = indexFolderProblem();
+    if (why === 'missing') return { absent: true };
+    if (why) throw namedError('index_folder_unsafe');
     const r = fsx.readOwnFile(path.join(st.indexDir, name), MAX_OWN_FILE_BYTES);
     if (r.absent) return { absent: true };
     if (!r.buf) return { corrupt: true };
@@ -436,6 +489,7 @@ function createStore(opts) {
   const lockPath = () => path.join(st.indexDir, LOCK);
 
   function readLock() {
+    if (indexFolderProblem()) return null; // a swapped folder never holds this process's lock
     try {
       const r = fsx.readOwnFile(lockPath(), MAX_LOCK_BYTES);
       if (!r.buf) return null;
@@ -451,6 +505,8 @@ function createStore(opts) {
   }
 
   function createLock() {
+    const why = indexFolderProblem();
+    if (why) throw namedError('index_folder_' + why);
     const fd = fs.openSync(lockPath(), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
       | (fs.constants.O_NOFOLLOW || 0), fsx.FILE_MODE);
     try {
@@ -463,6 +519,8 @@ function createStore(opts) {
 
   function removeLockPath() {
     // The lock path itself only: a link is removed as a link, never its target.
+    // Never through a folder that fails the check.
+    if (indexFolderProblem()) return;
     try { fs.unlinkSync(lockPath()); return; } catch (_) { /* maybe a folder link */ }
     try { fs.rmdirSync(lockPath()); } catch (_) { /* gone */ }
   }
@@ -475,6 +533,7 @@ function createStore(opts) {
   }
 
   function acquireLock() {
+    if (indexFolderProblem()) return false;
     try {
       createLock();
     } catch (err) {
@@ -487,13 +546,14 @@ function createStore(opts) {
     st.lock.lastTouch = clock.now();
     touchLock(true);
     // Right after taking the lock: remove every leftover temp file here, of any age.
-    fsx.cleanTemps(st.indexDir, { maxAgeMs: 0 });
+    cleanIndexTemps({ maxAgeMs: 0 });
     return true;
   }
 
   function touchLock(force) {
     const now = clock.now();
     if (!force && now - st.lock.lastTouch < LOCK_REFRESH_MS) return false;
+    if (indexFolderProblem()) return false;
     let fd = null;
     try {
       const s = fs.lstatSync(lockPath());
@@ -557,6 +617,15 @@ function createStore(opts) {
     if (off) { run.off = off; return run; }
     const problem = locationProblem(st.indexDir, rootReal, opts.gitCeiling);
     if (problem) { st.off = problem; run.off = problem; return run; }
+    // SR-24: an index folder swapped for a link or junction turns search off;
+    // nothing is listed, locked, read or written through it.
+    const folderWhy = indexFolderProblem();
+    if (folderWhy && folderWhy !== 'missing') {
+      st.folderChecks = 'failed';
+      st.off = 'index_folder_' + folderWhy;
+      run.off = st.off;
+      return run;
+    }
 
     if (!acquireLock()) {
       run.readOnly = true;
@@ -573,6 +642,7 @@ function createStore(opts) {
           load({ locked: true });
         } catch (err) {
           st.off = (err && err.name) || 'index_folder_unsafe';
+          if (/^index_folder_/.test(st.off)) st.folderChecks = 'failed';
           run.off = st.off;
           return run;
         }
@@ -925,7 +995,7 @@ function createStore(opts) {
     get dataReal() { return st.dataReal; },
     get counters() { return { ...st.counters }; },
     _lock: { holdsLock, touchLock, lockIsStale, acquireLock, releaseLock },
-    _test: { deleteIndexFolder, get pendingWrite() { return st.pendingWrite; } },
+    _test: { deleteIndexFolder, get pendingWrite() { return st.pendingWrite; }, get lastDelete() { return st.lastDelete; } },
   };
 }
 
