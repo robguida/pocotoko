@@ -26,7 +26,7 @@ test('6.13: the exact line per tier, ASCII only', () => {
 });
 
 test('6.4: k and M rounding at the boundaries; the tier is decided on the raw integer', () => {
-  const cases = [[1499, '1k'], [1500, '2k'], [999499, '999k'], [999500, '1000k'], [1000000, '1.0M'], [1500000, '1.5M'], [1049999, '1.0M'], [1050000, '1.1M']];
+  const cases = [[1499, '1k'], [1500, '2k'], [999499, '999k'], [999500, '1.0M'], [999999, '1.0M'], [1000000, '1.0M'], [1500000, '1.5M'], [1049999, '1.0M'], [1050000, '1.1M']];
   for (const [n, want] of cases) assert.equal(M.fmtSize(n), want, String(n));
   assert.equal(M.renderStatusLine(99600, D, { noColor: true }), 'chat 100k (warn 100k/150k)', '99,600 shows 100k but stays quiet');
 });

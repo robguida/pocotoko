@@ -327,17 +327,16 @@ function isUnsetValue(v) {
  * "use the default" (a never-set option is not stored, so absent is the normal case).
  */
 function readEnvOptions(env) {
-  // SEAM(check 5): whether Claude Code exports CLAUDE_PLUGIN_OPTION_<KEY> to hook commands is
-  // documented but not yet seen live (no hook naming an option ran in the logged-in probe).
-  // The upper-case key is read first, then the key as written. Every absent or empty value
-  // falls back to DEFAULTS, so a missing variable gives the default meter. The re-probe
-  // decides; only this function changes if the options arrive another way.
+  // Live (second logged-in probe, Claude Code 2.1.329): every plugin hook gets one variable
+  // per SET option, named CLAUDE_PLUGIN_OPTION_ plus the key in upper case (soft_tokens ->
+  // CLAUDE_PLUGIN_OPTION_SOFT_TOKENS), holding the stored text as written; a hook whose
+  // command names no option gets them too. A never-set option has no variable, and one set
+  // to "" arrives as empty text, so absent, empty or raw ${user_config...} text all mean the
+  // default. Only the upper-case name is read: no other form was seen or is documented.
   const raw = {};
   for (const key of Object.keys(DEFAULTS)) {
-    for (const name of [ENV_PREFIX + key.toUpperCase(), ENV_PREFIX + key]) {
-      const v = env[name];
-      if (typeof v === 'string' && !isUnsetValue(v)) { raw[key] = v; break; }
-    }
+    const v = env[ENV_PREFIX + key.toUpperCase()];
+    if (typeof v === 'string' && !isUnsetValue(v)) raw[key] = v;
   }
   return raw;
 }
@@ -461,9 +460,12 @@ function usageSum(u) {
   return seen ? Math.floor(sum) : null;
 }
 
-/** Display only (6.4): below 1,000,000 `<k>k` (half up), else `<m>M` with one decimal. */
+/**
+ * Display only (6.4): below 999,500 `<k>k` (half up), else `<m>M` with one decimal, so a
+ * size never shows as `1000k` (999,500 to 999,999 show as `1.0M`).
+ */
 function fmtSize(n) {
-  if (n >= 1000000) return (Math.round(n / 100000) / 10).toFixed(1) + 'M';
+  if (n >= 999500) return (Math.round(n / 100000) / 10).toFixed(1) + 'M';
   return Math.round(n / 1000) + 'k';
 }
 
@@ -512,7 +514,11 @@ const DEFAULT_COMPACTION = Object.freeze({
  * compaction (test seam) }.
  */
 function readTranscriptSize(file, opts = {}) {
-  const counts = { lines: 0, usage_records: 0, side_chain_skipped: 0, unreadable_lines: 0 };
+  // assistant_lines: lines holding the JSON string "assistant" (a record type or a message
+  // role), so a reply exists. readable_usage: main-thread assistant records whose
+  // message.usage is in the read shape, a zero sum included (the format is readable). Both
+  // are complete only when the whole window was read (status 'none').
+  const counts = { lines: 0, usage_records: 0, side_chain_skipped: 0, unreadable_lines: 0, assistant_lines: 0, readable_usage: 0 };
   const out = { status: 'none', size: null, fileBytes: 0, counts };
   const clock = opts.clock || Date.now;
   const comp = opts.compaction || DEFAULT_COMPACTION;
@@ -569,6 +575,7 @@ function readTranscriptSize(file, opts = {}) {
         counts.lines++;
         const hasAssistant = line.includes(assistantMark);
         const hasMarker = line.includes(marker);
+        if (hasAssistant) counts.assistant_lines++;
         if (!hasAssistant && !hasMarker) continue;
         let rec;
         try {
@@ -587,6 +594,7 @@ function readTranscriptSize(file, opts = {}) {
         if (rec.type !== 'assistant') continue;
         if (rec.isSidechain === true) { counts.side_chain_skipped++; continue; }
         const sum = usageSum(rec.message && typeof rec.message === 'object' ? rec.message.usage : null);
+        if (sum !== null) counts.readable_usage++;
         // A zero sum (for example a synthetic API-error record) is no size: keep looking
         // back. Only a compaction record gives size 0 (6.3).
         if (sum === null || sum === 0) continue;
@@ -1036,7 +1044,12 @@ function handlePrompt(input, ctx) {
         message = `chat-length meter: the chat is about ${fmtSize(r.size)} tokens (new-session size ${fmtSize(opts.hard_tokens)}). Finish this step, then start a new session.`
           + (note ? ` Hand-off note file: ${note}` : '');
       }
-    } else if (r.status === 'none' && r.fileBytes >= LIMITS.SMALL_FLOOR) {
+    } else if (r.status === 'none' && r.fileBytes >= LIMITS.SMALL_FLOOR && !isNew && r.counts.assistant_lines > 0 && r.counts.readable_usage === 0) {
+      // 6.8: only after a reply exists. A first prompt's attachment records alone can pass the
+      // floor, so the line needs this session's state file from an earlier prompt AND a line
+      // naming the assistant role in the read window; it never fires before the first reply.
+      // A usage record in the read shape, even with a zero sum (a failed request), proves the
+      // format is readable, so it never gives the line.
       state.off = true;
       tellOnce('format', LINES.FORMAT);
     }
@@ -1233,8 +1246,12 @@ function main(seams = {}) {
   const env = process.env;
   const home = homeDir();
   const base = { env, scriptFile: __filename, home, platform: process.platform, gitCeiling: seams.gitCeiling || null, compaction: seams.compaction };
+  // 6.9: the Node self-check runs before stdin is read or any file is touched, for the prompt
+  // hook, --sync and --statusline alike (--selftest is a user's own check of a named file).
+  const nodeInside = () => nodeInsideProject({ execPath: process.execPath, projectDir: env.CLAUDE_PROJECT_DIR, cwd: process.cwd(), home });
 
   if (argv[0] === '--sync') {
+    if (nodeInside()) { finish('sync: skipped (node_in_project)'); return; }
     const r = sync({ ...base, args: argv.slice(1) });
     finish('sync: ' + (r.done ? (r.copied ? 'copied' : 'unchanged') : 'skipped (' + r.reason + ')'));
     return;
@@ -1244,6 +1261,8 @@ function main(seams = {}) {
     return;
   }
   if (argv[0] === '--statusline') {
+    // Node inside the project: the empty form with the default thresholds; reads nothing.
+    if (nodeInside()) { finish(renderStatusLine(null, DEFAULTS)); return; }
     readStdin(process.stdin, LIMITS.STDIN_MAX_BYTES, (text) => {
       try {
         finish(statusLine(parseJson(text), base));
@@ -1256,7 +1275,7 @@ function main(seams = {}) {
   if (argv.length) { finish(null); return; }
 
   // The prompt hook. 6.9: the Node self-check runs before stdin is read or any file touched.
-  if (nodeInsideProject({ execPath: process.execPath, projectDir: env.CLAUDE_PROJECT_DIR, cwd: process.cwd(), home })) {
+  if (nodeInside()) {
     finish(asciiJson({ systemMessage: LINES.NODE_IN_PROJECT }));
     return;
   }

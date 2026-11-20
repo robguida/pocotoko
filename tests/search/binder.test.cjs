@@ -88,7 +88,17 @@ test('SR-4 f: a UNC value (root, start folder or projects entry) is refused befo
   const unc = BS + BS + W('srv', 'share', 'a');
   const unc2 = BS + BS + W('srv', 'share', 'b');
   const longUnc = BS + BS + W('?', 'UNC', 'srv', 'share', 'c');
+  const devUnc = BS + BS + W('.', 'UNC', 'srv', 'share', 'd');
+  const fwdUnc = '//srv/share/e';
   const root = W('C:', 'proj');
+  // The text test alone: network forms vs the local long-path and device forms of a drive.
+  for (const p of [unc, longUnc, devUnc, fwdUnc, BS + BS + W('?', 'Volume{00000000-0000-0000-0000-000000000000}', 'x'), BS + BS + '?' + BS + 'C:', '  ' + unc]) {
+    assert.equal(B.isNetworkText(p, 'win32'), true, 'network (or fail closed): ' + p);
+  }
+  for (const p of [BS + BS + W('?', 'C:', 'proj'), BS + BS + W('.', 'C:', 'proj'), BS + BS + W('?', 'd:', ''), '//?/C:/proj', '//./C:/proj', root, '/w/a']) {
+    assert.equal(B.isNetworkText(p, 'win32'), false, 'local: ' + p);
+  }
+  assert.equal(B.isNetworkText(unc, 'linux'), false, 'text rule is Windows only');
   // Spy: every file-system call the binder could make on a path records it and throws.
   const calls = [];
   const spied = [];
@@ -103,7 +113,7 @@ test('SR-4 f: a UNC value (root, start folder or projects entry) is refused befo
   fs.realpathSync.native = (...a) => { calls.push('realpathSync.native ' + String(a[0])); throw new Error('file-system call in a network test'); };
   const results = [];
   try {
-    for (const raw of [[unc], [longUnc], JSON.stringify([unc, unc2]), unc, unc + '\n' + unc2]) {
+    for (const raw of [[unc], [longUnc], [devUnc], [fwdUnc], JSON.stringify([unc, unc2]), unc, unc + '\n' + unc2]) {
       const r = B.projectSwitch(root, raw, { platform: 'win32' });
       results.push(['entries', raw, r]);
     }
@@ -112,7 +122,9 @@ test('SR-4 f: a UNC value (root, start folder or projects entry) is refused befo
     results.push(['comma', null, B.projectSwitch(root, unc + ',' + unc2, { platform: 'win32' })]);
     results.push(['root', null, B.resolveRoot({ env: { CLAUDE_PROJECT_DIR: unc }, cwd: root, platform: 'win32' })]);
     results.push(['root', null, B.resolveRoot({ env: { CLAUDE_PROJECT_DIR: longUnc }, cwd: root, platform: 'win32' })]);
+    results.push(['root', null, B.resolveRoot({ env: { CLAUDE_PROJECT_DIR: devUnc }, cwd: root, platform: 'win32' })]);
     results.push(['root', null, B.resolveRoot({ env: {}, cwd: unc, platform: 'win32' })]);
+    results.push(['root', null, B.resolveRoot({ env: {}, cwd: fwdUnc, platform: 'win32' })]);
   } finally {
     for (const [obj, name, orig] of spied) obj[name] = orig;
     fs.realpathSync.native = nativeOrig;
@@ -133,6 +145,20 @@ test('SR-4 f: a UNC value (root, start folder or projects entry) is refused befo
   const seam = (p) => { asked.push(p); return p === root ? p : null; };
   assert.deepEqual(B.commaReading(root + ',' + unc, 'win32', seam), { entries: [root, unc] });
   assert.ok(!asked.some((p) => B.isNetworkText(p, 'win32')), 'no network piece looked up');
+});
+
+test('SR-4 f (Windows, real folders): a projects entry and CLAUDE_PROJECT_DIR in the local long-path form \\\\?\\<drive>:\\ or the device form \\\\.\\<drive>:\\ are resolved normally and bind', { skip: !IS_WIN && 'Windows only: these path forms exist only there; the text rule is covered on every OS above' }, () => {
+  const b = base('longpath');
+  const proj = mk(b, 'proj');
+  const real = fs.realpathSync.native(proj);
+  const BS = String.fromCharCode(92);
+  for (const prefix of [BS + BS + '?' + BS, BS + BS + '.' + BS]) {
+    const r = B.projectSwitch(real, [prefix + real], { platform: 'win32' });
+    assert.deepEqual([r.enabled, r.refusedEntries, r.bad], [true, 0, 0], prefix);
+    const root = B.resolveRoot({ env: { CLAUDE_PROJECT_DIR: prefix + real }, cwd: b, platform: 'win32' });
+    assert.equal(root.source, 'project_dir', prefix);
+    assert.equal(String(root.rootReal).toLowerCase(), real.toLowerCase(), prefix + ': bound to the plain real path');
+  }
 });
 
 test('isAbsoluteFor: a Windows path needs a drive or a UNC start; POSIX needs a leading slash', () => {

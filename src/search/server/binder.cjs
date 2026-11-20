@@ -166,9 +166,19 @@ function isFilesystemRoot(p, platform) {
   return P.parse(r).root === r || fsx.samePath(P.dirname(r), r, platform);
 }
 
-/** The text-only network test (Windows UNC and `\\?\UNC\` forms): no file-system call. */
+/**
+ * The text-only network test (SR-4 f, Windows): no file-system call. A value starting with
+ * two separators is network (`\\server\share`, `//server/share`, `\\?\UNC\...`,
+ * `\\.\UNC\...`), except the local long-path and device forms of a drive, `\\?\<drive>:\`
+ * and `\\.\<drive>:\` (either separator), which are resolved normally. Anything else that
+ * starts with two separators (a volume GUID path, a bare `\\?\C:` device) counts as
+ * network: it fails closed.
+ */
 function isNetworkText(p, platform) {
-  return platform === 'win32' && /^[\\/]{2}/.test(String(p).trim());
+  if (platform !== 'win32') return false;
+  const s = String(p).trim();
+  if (!/^[\\/]{2}/.test(s)) return false;
+  return !/^[\\/]{2}[?.][\\/][A-Za-z]:[\\/]/.test(s);
 }
 
 function isNetworkPath(p, platform, statfs) {

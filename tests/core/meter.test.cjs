@@ -224,26 +224,103 @@ test('6.3: a transcript larger than the 64 MB read cap is still read from the en
   fs.unlinkSync(big);
 });
 
-test('6.8: the loud notice at 262,144 bytes with no readable usage, once per session; 262,143 bytes gives none; neither blocks', () => {
+/**
+ * A transcript of exactly `bytes` bytes with no usage record: an optional reply record whose
+ * usage is in a shape the meter cannot read (a format change), then one padding record.
+ */
+function noUsageFile(b, name, bytes, { reply = true } = {}) {
+  const lines = reply ? [JSON.stringify({ type: 'assistant', isSidechain: false, message: { role: 'assistant', model: 'model-small-1', tokens: { in: 5 } } })] : [];
+  const head = '{"type":"mode","pad":"';
+  const tail = '"}\n';
+  const lead = lines.map((l) => l + '\n').join('');
+  const f = path.join(b.tdir, name + '.jsonl');
+  fs.writeFileSync(f, lead + head + 'a'.repeat(bytes - lead.length - head.length - tail.length) + tail);
+  assert.equal(fs.statSync(f).size, bytes);
+  return f;
+}
+
+test('6.8: after a first prompt, a reply record with no readable usage at 262,144 bytes gives the loud notice, once per session; 262,143 bytes gives none; neither blocks', () => {
   const b = H.makeBase('floor');
   const kit = H.copyKit(b);
   const env = H.copyEnv(b);
-  const fileOf = (name, bytes) => {
-    const head = '{"type":"mode","pad":"';
-    const tail = '"}\n';
-    const f = path.join(b.tdir, name + '.jsonl');
-    fs.writeFileSync(f, head + 'a'.repeat(bytes - head.length - tail.length) + tail);
-    assert.equal(fs.statSync(f).size, bytes);
-    return f;
-  };
-  const at = fileOf('at', M.LIMITS.SMALL_FLOOR);
-  const under = fileOf('under', M.LIMITS.SMALL_FLOOR - 1);
+  const small = H.writeTranscript(b, H.FIXTURE_LINES.slice(0, 2).join('\n') + '\n', { name: 'first' });
+  const at = noUsageFile(b, 'at', M.LIMITS.SMALL_FLOOR);
+  const under = noUsageFile(b, 'under', M.LIMITS.SMALL_FLOOR - 1);
+  // The first prompt of each session creates its state file (no reply yet, no notice).
+  assert.equal(M.handlePrompt(H.promptInput(b, small, H.sessionId(1)), ctxOf(b, kit, env)), null);
+  assert.equal(M.handlePrompt(H.promptInput(b, small, H.sessionId(2)), ctxOf(b, kit, env)), null);
   const o1 = M.handlePrompt(H.promptInput(b, at, H.sessionId(1)), ctxOf(b, kit, env));
   assert.deepEqual(o1, { systemMessage: M.LINES.FORMAT });
   assert.equal(M.LINES.FORMAT, "chat-length meter cannot read this chat's format; it is off for this session");
   assert.equal(M.handlePrompt(H.promptInput(b, at, H.sessionId(1)), ctxOf(b, kit, env)), null, 'once per session');
   assert.equal(M.handlePrompt(H.promptInput(b, under, H.sessionId(2)), ctxOf(b, kit, env)), null);
   noBlocking(o1);
+});
+
+test('6.8: a session\'s first prompt never gives the notice: ~300 KB of attachment records and no reply record -> no notice and off stays false; the same file with no reply on a later prompt -> none either', () => {
+  const b = H.makeBase('first');
+  const kit = H.copyKit(b);
+  const env = H.copyEnv(b);
+  const pad = (kind, n) => JSON.stringify({ type: 'attachment', attachment: { type: kind, content: 'x'.repeat(n) } });
+  // Shaped like the step 0c capture's first turn: a large instructions record, a prompt
+  // snapshot and smaller attachments, a user record and a request copy with the user role only.
+  const lines = [
+    JSON.stringify({ type: 'queue-operation', operation: 'enqueue' }),
+    pad('instructions', 213000),
+    pad('skill_listing', 9000),
+    pad('prompt_snapshot', 70000),
+    pad('session_context', 4000),
+    JSON.stringify({ type: 'user', message: { role: 'user', content: 'x' } }),
+    JSON.stringify({ type: 'api-request-blob', messages: [{ role: 'user' }] }),
+  ];
+  const f = H.writeTranscript(b, lines.join('\n') + '\n', { name: 'first-turn' });
+  const size = fs.statSync(f).size;
+  assert.ok(size >= 290000 && size > M.LIMITS.SMALL_FLOOR, 'about 300 KB: ' + size);
+  const r = M.readTranscriptSize(f);
+  assert.equal(r.status, 'none');
+  assert.equal(r.counts.assistant_lines, 0);
+  const sid = H.sessionId(820);
+  assert.equal(M.handlePrompt(H.promptInput(b, f, sid), ctxOf(b, kit, env)), null, 'no notice on the first prompt');
+  const statePath = path.join(kit.stateRoot, 'state', 'sessions', sid + '.json');
+  assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).off, false, 'off stays false');
+  // A later prompt, still with no reply record in the window: no notice, still not off.
+  assert.equal(M.handlePrompt(H.promptInput(b, f, sid), ctxOf(b, kit, env)), null, 'no reply yet: no notice');
+  assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).off, false);
+  // A reply record with unreadable usage on the first prompt of a fresh session: still none.
+  const g = noUsageFile(b, 'reply-first', M.LIMITS.SMALL_FLOOR + 1000);
+  assert.equal(M.handlePrompt(H.promptInput(b, g, H.sessionId(821)), ctxOf(b, kit, env)), null, 'first prompt of the session');
+  // Then the same session's next prompt: the notice.
+  assert.deepEqual(M.handlePrompt(H.promptInput(b, g, H.sessionId(821)), ctxOf(b, kit, env)), { systemMessage: M.LINES.FORMAT });
+});
+
+test('6.8: after a failed first turn (only zero-sum usage records, an API-error reply) a second prompt at >= 256 KiB gives no notice and off stays false; usage missing or moved still gives it', () => {
+  const b = H.makeBase('zerousage');
+  const kit = H.copyKit(b);
+  const env = H.copyEnv(b);
+  const pad = (kind, n) => JSON.stringify({ type: 'attachment', attachment: { type: kind, content: 'x'.repeat(n) } });
+  const head = [pad('instructions', 213000), pad('prompt_snapshot', 70000), JSON.stringify({ type: 'user', message: { role: 'user', content: 'x' } })];
+  const zero = H.assistantLine({ usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } });
+  const f = H.writeTranscript(b, head.concat([zero]).join('\n') + '\n', { name: 'failed-first-turn' });
+  assert.ok(fs.statSync(f).size >= M.LIMITS.SMALL_FLOOR);
+  const r = M.readTranscriptSize(f);
+  assert.equal(r.status, 'none');
+  assert.equal(r.counts.assistant_lines, 1);
+  assert.equal(r.counts.readable_usage, 1, 'a zero-sum usage record is in the read shape');
+  const sid = H.sessionId(830);
+  const statePath = path.join(kit.stateRoot, 'state', 'sessions', sid + '.json');
+  assert.equal(M.handlePrompt(H.promptInput(b, f, sid), ctxOf(b, kit, env)), null, 'prompt 1');
+  assert.equal(M.handlePrompt(H.promptInput(b, f, sid), ctxOf(b, kit, env)), null, 'prompt 2: no notice');
+  assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).off, false, 'off stays false');
+  // The positive cases still fire on the second prompt: usage missing, and usage moved.
+  const missing = JSON.stringify({ type: 'assistant', isSidechain: false, message: { role: 'assistant', model: 'model-small-1' } });
+  const moved = JSON.stringify({ type: 'assistant', isSidechain: false, message: { role: 'assistant', model: 'model-small-1', tokens: { input_tokens: 5 } } });
+  let k = 831;
+  for (const [label, rec] of [['missing', missing], ['moved', moved]]) {
+    const g = H.writeTranscript(b, head.concat([rec]).join('\n') + '\n', { name: 'fmt-' + label });
+    const s = H.sessionId(k++);
+    assert.equal(M.handlePrompt(H.promptInput(b, g, s), ctxOf(b, kit, env)), null, label + ': prompt 1');
+    assert.deepEqual(M.handlePrompt(H.promptInput(b, g, s), ctxOf(b, kit, env)), { systemMessage: M.LINES.FORMAT }, label + ': prompt 2');
+  }
 });
 
 test('6.3 / T-38: a missing transcript, a folder and an empty or non-string path give no output', () => {
@@ -508,7 +585,7 @@ test('6.2: invalid options, one case each, plugin mode (env) and copy-by-hand (f
   assert.equal(promptAt(b, plug, H.pluginEnv(b, plug, { repeat_every_tokens: 0 }), 50000, H.sessionId(151)), null, 'valid, no notice');
 });
 
-test('6.2 / SEAM(check 5): plugin mode reads CLAUDE_PLUGIN_OPTION_<KEY>; absent, empty or raw ${user_config...} text means the default; copy-by-hand ignores the env and reads the kit file; the same values give the same tier from both sources', () => {
+test('6.2 / live check 5 (hooks): plugin mode reads CLAUDE_PLUGIN_OPTION_<KEY in upper case>, the only form seen live; absent (never set), empty ("") or raw ${user_config...} text means the default; copy-by-hand ignores the env and reads the kit file; the same values give the same tier from both sources', () => {
   const b = H.makeBase('src');
   const plug = H.pluginKit(b);
   const copy = H.copyKit(b);
@@ -516,6 +593,9 @@ test('6.2 / SEAM(check 5): plugin mode reads CLAUDE_PLUGIN_OPTION_<KEY>; absent,
   assert.deepEqual(M.readEnvOptions({ CLAUDE_PLUGIN_OPTION_SOFT_TOKENS: '' }), {});
   assert.deepEqual(M.readEnvOptions({ CLAUDE_PLUGIN_OPTION_SOFT_TOKENS: '${user_config.soft_tokens}' }), {});
   assert.deepEqual(M.readEnvOptions({ CLAUDE_PLUGIN_OPTION_SOFT_TOKENS: '120000' }), { soft_tokens: '120000' });
+  // The key as written (lower case) is not a form Claude Code exports, so it is not read.
+  assert.deepEqual(M.readEnvOptions({ CLAUDE_PLUGIN_OPTION_soft_tokens: '120000' }), {});
+  assert.deepEqual(M.readEnvOptions({ CLAUDE_PLUGIN_OPTION_HARD_TOKENS: '200000', CLAUDE_PLUGIN_OPTION_HANDOFF_NOTE: 'false' }), { hard_tokens: '200000', handoff_note: 'false' });
   assert.deepEqual(M.validateOptions(M.readEnvOptions({})), { options: { ...M.DEFAULTS }, invalid: false });
   const vals = { soft_tokens: 120000, hard_tokens: 130000 };
   const penv = H.pluginEnv(b, plug, vals);
@@ -525,7 +605,7 @@ test('6.2 / SEAM(check 5): plugin mode reads CLAUDE_PLUGIN_OPTION_<KEY>; absent,
   assert.match(promptAt(b, copy, cenv, 125000, H.sessionId(160)).hookSpecificOutput.additionalContext, /first warning size \(120k\)/, 'file read, env ignored');
   assert.equal(M.tierOf(125000, M.validateOptions(vals).options), M.tierOf(125000, M.validateOptions(M.readEnvOptions(penv)).options));
   const src = fs.readFileSync(H.METER_SRC, 'utf8');
-  assert.equal(src.split('SEAM(check 5):').length - 1, 1, 'exactly one marked seam');
+  assert.equal(src.split('SEAM(check 5)').length - 1, 0, 'the hook option seam is closed (second logged-in probe)');
 });
 
 // ---------------------------------------------------------------------------
@@ -890,6 +970,53 @@ test('T-35 (core part): a copy of the running Node inside the project, as CLAUDE
     assert.deepEqual(H.listing(kit.stateRoot), before.kit, label + ': state root unchanged');
     assert.deepEqual(H.listing(b.proj), before.proj, label + ': project unchanged');
   }
+});
+
+test('6.9 / T-35 (core part): --sync with Node inside the project (as CLAUDE_PROJECT_DIR, or as the process start folder) prints its skipped line and writes nothing; the same run with the real Node copies', () => {
+  const b = H.makeBase('t35sync');
+  const plug = H.pluginKit(b);
+  const planted = plantNode(path.join(b.proj, 'tools'));
+  const cases = [
+    ['project dir', H.pluginEnv(b, plug), b.tdir],
+    ['start folder', { ...H.pluginEnv(b, plug), CLAUDE_PROJECT_DIR: undefined }, b.proj],
+  ];
+  for (const [label, env, cwd] of cases) {
+    const before = { data: H.listing(plug.data), proj: H.listing(b.proj) };
+    const r = R.runMeter(b, { scriptFile: plug.scriptFile, args: ['--sync'], execPath: planted, cwd, env });
+    assert.equal(r.status, 0, label);
+    assert.equal(r.text.trim(), 'sync: skipped (node_in_project)', label);
+    assert.deepEqual(H.listing(plug.data), before.data, label + ': data folder unchanged');
+    assert.deepEqual(H.listing(b.proj), before.proj, label + ': project unchanged');
+  }
+  const ctl = R.runMeter(b, { scriptFile: plug.scriptFile, args: ['--sync'], cwd: b.tdir, env: H.pluginEnv(b, plug) });
+  assert.equal(ctl.status, 0);
+  assert.equal(ctl.text.trim(), 'sync: copied', 'control: the real Node copies');
+  assert.ok(fs.existsSync(path.join(plug.data, 'statusline', 'meter.cjs')));
+});
+
+test('6.9 / T-35 (core part): --statusline with Node inside the project prints the empty form with the default thresholds and reads nothing (no stdin size, no config); the same run with the real Node reads both', () => {
+  const b = H.makeBase('t35sl');
+  const plug = H.pluginKit(b);
+  const cfg = H.mk(plug.data, 'config');
+  fs.writeFileSync(path.join(cfg, 'meter-config.json'), JSON.stringify({ soft_tokens: 120000, hard_tokens: 130000 }));
+  const planted = plantNode(path.join(b.proj, 'tools'));
+  const input = JSON.stringify({ context_window: { total_input_tokens: 140000 } });
+  const empty = M.renderStatusLine(null, M.DEFAULTS);
+  assert.equal(empty, 'chat -- (warn 100k/150k)');
+  const cases = [
+    ['project dir', H.pluginEnv(b, plug), b.tdir],
+    ['start folder', { ...H.pluginEnv(b, plug), CLAUDE_PROJECT_DIR: undefined }, b.proj],
+  ];
+  for (const [label, env, cwd] of cases) {
+    const before = { data: H.listing(plug.data), proj: H.listing(b.proj) };
+    const r = R.runMeter(b, { scriptFile: plug.scriptFile, args: ['--statusline'], input, execPath: planted, cwd, env });
+    assert.equal(r.status, 0, label);
+    assert.equal(r.text.trim(), empty, label);
+    assert.deepEqual(H.listing(plug.data), before.data, label + ': nothing written');
+    assert.deepEqual(H.listing(b.proj), before.proj, label + ': project unchanged');
+  }
+  const ctl = R.runMeter(b, { scriptFile: plug.scriptFile, args: ['--statusline'], input, cwd: b.tdir, env: H.pluginEnv(b, plug) });
+  assert.equal(ctl.text.trim(), 'chat 140k NEW SESSION NOW (warn 120k/130k)', 'control: size and config read');
 });
 
 test('6.9 / T-38: spaces and non-ASCII paths work; the JSON out is ASCII (non-ASCII escaped as \\uXXXX); exit 0 within the time budget; no blocking field', () => {

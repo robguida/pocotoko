@@ -164,12 +164,15 @@ function checkArgs(def, args) {
  * .mcp.json, as `${user_config.KEY}` substituted into SEARCH_OPTION_<KEY>.
  */
 function optionsFromEnv(env) {
-  // SEAM(check 5): still open after the logged-in probe (Claude Code 2.1.329): no plugin
-  // MCP server started there, so whether `${user_config.KEY}` is substituted in `.mcp.json`
-  // `env`, and whether a never-set option blocks the launch (every hook naming one failed
-  // before its script ran; the cause is not isolated), is not yet seen. Safe default kept:
-  // each option through `env` only (never `args`), passed raw to the parsers; an empty value or raw `${user_config.KEY}` text counts as unset. If the
-  // server is not launched or gets no value, `projects` is unset and search stays off.
+  // SEAM(check 5): still open after both logged-in probes (Claude Code 2.1.329): no plugin
+  // MCP server could start there (an organisation-managed MCP file was present), so whether
+  // `${user_config.KEY}` is substituted in `.mcp.json` `env`, and whether a never-set option
+  // blocks the server launch, is not yet seen. For hooks the second probe showed a set
+  // option substituted as stored and a never-set option blocking only the launch that names
+  // it; the server may behave the same (B9 checks). Safe default kept: each option through
+  // `env` only (never `args`), passed raw to the parsers; an empty value or raw
+  // `${user_config.KEY}` text counts as unset. If the server is not launched or gets no
+  // value, `projects` is unset and search stays off.
   const out = {};
   for (const k of OPTION_KEYS) {
     const raw = env[ENV_PREFIX + k.toUpperCase()];
