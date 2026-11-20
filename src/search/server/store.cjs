@@ -160,6 +160,10 @@ function createStore(opts) {
     counters: { reads: 0, hashes: 0, scans: 0, writes: 0 },
   };
   let filter = floor.buildFilter(options);
+  // Query-time options (matching, word_families, synonyms): they act on the
+  // in-memory index only, so they are not part of the options hash and a
+  // change needs no rebuild (9.5 e).
+  const queryOpts = rankMod.queryOptions(options);
   let manifest = { files: {} };
   let records = new Map(); // rel -> stored chunk records
   let index = indexMod.createIndex();
@@ -316,6 +320,7 @@ function createStore(opts) {
       manifest = { files: r.man.files };
       records = r.recs;
       for (const list of records.values()) for (const rec of list) index.add(rec);
+      index.prepare(); // sorted words and length buckets ready before the first query
       st.everBuilt = true;
       // A rebuild only recorded (never started) is not needed any more.
       if (st.rebuild && !st.rebuild.done && !st.rebuild.reset) st.rebuild = null;
@@ -355,7 +360,9 @@ function createStore(opts) {
   function rank(query, rankOptions = {}) {
     if (st.rebuild && !st.rebuild.done) throw namedError('IndexRebuilding');
     const parsed = typeof query === 'string' ? tokenize.parseQuery(query) : query;
-    return rankMod.rank(index, parsed, rankOptions);
+    const merged = { matching: queryOpts.matching, wordFamilies: queryOpts.wordFamilies, synonyms: queryOpts.synonyms };
+    for (const [key, v] of Object.entries(rankOptions)) if (v !== undefined) merged[key] = v;
+    return rankMod.rank(index, parsed, merged);
   }
 
   // -------------------------------------------------------------------------
@@ -597,6 +604,9 @@ function createStore(opts) {
       for (const rel of new Set([...Object.keys(manifest.files), ...records.keys()])) {
         if (!seen.has(rel) && purge(rel)) dirty = true;
       }
+      // Merge this run's new and dropped words into the sorted list and buckets
+      // now, inside the refresh, not inside the next query's budget.
+      index.prepare();
       run.chunks = chunkCount;
       run.files = indexedFiles;
       if (chunkCount > limits.chunksSoft) st.warnings.push(LARGE_PROJECT_LINE);
@@ -686,11 +696,11 @@ function createStore(opts) {
    * Convenience for callers and tests: stat pass, then rank. Throws the named
    * error IndexRebuilding while a full rebuild has not finished.
    */
-  async function search(query, { k, matching, includeRetired, statBudgetMs, budgetMs, now } = {}) {
+  async function search(query, { k, matching, wordFamilies, synonyms, includeRetired, statBudgetMs, budgetMs, now } = {}) {
     const s = await ensureFresh(statBudgetMs === undefined ? STAT_BUDGET_MS : statBudgetMs);
     if (s === 'off') return { state: 'off', reason: isOff(), results: [], hidden: [], hiddenCount: 0 };
     const parsed = tokenize.parseQuery(query);
-    const r = rank(parsed, { k, matching, includeRetired, budgetMs, now });
+    const r = rank(parsed, { k, matching, wordFamilies, synonyms, includeRetired, budgetMs, now });
     const notice = st.notice;
     st.notice = null;
     return { state: s, notice, ...r };
@@ -726,6 +736,9 @@ function createStore(opts) {
       rebuild: st.rebuild ? { reason: st.rebuild.reason, done: st.rebuild.done } : null,
       warnings: st.warnings.slice(),
       filterCounts: { ...filter.counts },
+      matching: queryOpts.matching,
+      wordFamilies: queryOpts.wordFamilies,
+      queryCounts: { bad_synonym: queryOpts.synonyms.bad },
     };
   }
 

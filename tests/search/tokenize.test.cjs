@@ -74,8 +74,26 @@ test('query: 33 words → the first 32 are used and the result says so', () => {
 });
 
 test('query: a trailing * is recorded per word; repeated words are kept once', () => {
-  const q = T.parseQuery('deploy* deploy roll*back');
+  const q = T.parseQuery('deploy* deploy roll* back');
   assert.deepEqual(q.words, [{ w: 'deploy', wild: true }, { w: 'roll', wild: true }, { w: 'back', wild: false }]);
+});
+
+test('T-17 (parse part): a middle * and ** are plain separators; a lone or leading * gives no wildcard', () => {
+  assert.deepEqual(T.parseQuery('roll*back').words, [{ w: 'roll', wild: false }, { w: 'back', wild: false }]);
+  assert.deepEqual(T.parseQuery('deploy**').words, [{ w: 'deploy', wild: false }]);
+  assert.deepEqual(T.parseQuery('*deploy').words, [{ w: 'deploy', wild: false }]);
+  assert.deepEqual(T.parseQuery('*').words, []);
+  assert.deepEqual(T.parseQuery('**').words, []);
+  assert.deepEqual(T.parseQuery('deploy*, rollback*').words, [{ w: 'deploy', wild: true }, { w: 'rollback', wild: true }]);
+  assert.equal(T.trailingWildcard('ab*', 2), true);
+  assert.equal(T.trailingWildcard('ab*c', 2), false);
+});
+
+test('acronym flag: tokens and query words kept by the acronym rule carry acr', () => {
+  assert.deepEqual(T.tokenize('HTTP tests'), [{ w: 'http', pos: 0, acr: true }, { w: 'tests', pos: 1 }]);
+  assert.deepEqual(T.parseQuery('TESTS tests').words, [{ w: 'tests', wild: false }]); // one plain repeat: not an acronym
+  assert.deepEqual(T.parseQuery('TESTS').words, [{ w: 'tests', wild: false, acr: true }]);
+  assert.deepEqual(T.nameTokens('docs/CI-setup.md'), [{ w: 'ci', pos: 0, acr: true }, { w: 'setup', pos: 1 }]);
 });
 
 test('T-16 queries: symbols, controls, a lone surrogate and combining-mark runs are plain separators', () => {

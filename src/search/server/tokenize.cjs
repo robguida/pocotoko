@@ -65,18 +65,26 @@ function wellFormed(s) {
   return typeof s.toWellFormed === 'function' ? s.toWellFormed() : s.replace(/[\ud800-\udfff]/g, '�');
 }
 
+/** True when a raw word is caught by the acronym rule (c). */
+function isAcronym(raw) {
+  const len = cpLength(raw);
+  return len >= ACRONYM_MIN && len <= ACRONYM_MAX && ACRONYM_RE.test(raw) && HAS_UPPER_RE.test(raw);
+}
+
 /** Apply rules b to d to one raw word; returns the kept lower-case word or null. */
 function keepWord(raw, stop = STOP_SET) {
   const len = cpLength(raw);
   if (len < 2 || len > MAX_WORD_CHARS) return null;
   const lower = raw.normalize('NFC').toLowerCase();
-  if (len >= ACRONYM_MIN && len <= ACRONYM_MAX && ACRONYM_RE.test(raw) && HAS_UPPER_RE.test(raw)) return lower;
+  if (isAcronym(raw)) return lower;
   if (stop.has(lower)) return null;
   return lower;
 }
 
 /**
- * Words of a text: [{ w, pos }] in order. pos counts every raw word.
+ * Words of a text: [{ w, pos }] in order. pos counts every raw word. A word
+ * kept by the acronym rule also carries `acr: true` (the word-family rule of
+ * the broader matching level never stems it, 9.5 phase 2 a).
  */
 function tokenize(text) {
   const out = [];
@@ -87,7 +95,7 @@ function tokenize(text) {
   let m;
   while ((m = WORD_RE.exec(s)) !== null) {
     const w = keepWord(m[0]);
-    if (w !== null) out.push({ w, pos });
+    if (w !== null) out.push(isAcronym(m[0]) ? { w, pos, acr: true } : { w, pos });
     pos++;
   }
   return out;
@@ -98,11 +106,31 @@ function words(text) {
   return tokenize(text).map((t) => t.w);
 }
 
-/** Words of a file's base name without its extension (the file-name field). */
-function nameWords(relPath) {
+/** Tokens of a file's base name without its extension (the file-name field). */
+function nameTokens(relPath) {
   const base = String(relPath).split('/').pop() || '';
   const dot = base.lastIndexOf('.');
-  return words(dot > 0 ? base.slice(0, dot) : base);
+  return tokenize(dot > 0 ? base.slice(0, dot) : base);
+}
+
+/** Words of a file's base name without its extension (the file-name field). */
+function nameWords(relPath) {
+  return nameTokens(relPath).map((t) => t.w);
+}
+
+const WORD_CHAR_RE = /[\p{L}\p{N}\p{M}]/u;
+
+/**
+ * True when a typed trailing wildcard follows a word ending at `end`: exactly
+ * one `*`, then the end of the query or a separator. A middle `*` (`de*ploy`)
+ * and `**` are plain separators (T-17).
+ */
+function trailingWildcard(s, end) {
+  if (s[end] !== '*') return false;
+  const next = s[end + 1];
+  if (next === undefined) return true;
+  if (next === '*') return false;
+  return !WORD_CHAR_RE.test(next);
 }
 
 function queryError(name) {
@@ -114,9 +142,11 @@ function queryError(name) {
 /**
  * Parse a query. Rejects a non-string or a query over 512 characters with a
  * named error. Uses the first 32 kept words (and says so). Repeated words are
- * kept once. Each word records whether a `*` follows it directly.
+ * kept once. Each word records whether a typed trailing `*` follows it
+ * (trailingWildcard), and `acr: true` when the acronym rule kept it (only when
+ * every repeat of the word was an acronym).
  *
- * Returns { words: [{ w, wild }], truncated, empty }.
+ * Returns { words: [{ w, wild, acr? }], truncated, empty }.
  */
 function parseQuery(q) {
   if (typeof q !== 'string') throw queryError('InvalidArgument');
@@ -130,14 +160,17 @@ function parseQuery(q) {
     const w = keepWord(m[0]);
     if (w === null) continue;
     if (kept.length >= MAX_QUERY_WORDS) { truncated = true; break; }
-    kept.push({ w, wild: s[m.index + m[0].length] === '*' });
+    kept.push({ w, wild: trailingWildcard(s, m.index + m[0].length), acr: isAcronym(m[0]) });
   }
   const seen = new Map();
   for (const k of kept) {
     const prev = seen.get(k.w);
-    if (prev) prev.wild = prev.wild || k.wild;
-    else seen.set(k.w, { w: k.w, wild: k.wild });
+    if (prev) {
+      prev.wild = prev.wild || k.wild;
+      prev.acr = prev.acr && k.acr;
+    } else seen.set(k.w, { w: k.w, wild: k.wild, acr: k.acr });
   }
+  for (const v of seen.values()) if (!v.acr) delete v.acr;
   const list = [...seen.values()];
   return { words: list, truncated, empty: list.length === 0 };
 }
@@ -150,9 +183,12 @@ module.exports = {
   STOP_WORDS,
   TOK_VERSION,
   tokenizerVersion,
+  isAcronym,
   keepWord,
   tokenize,
   words,
+  nameTokens,
   nameWords,
+  trailingWildcard,
   parseQuery,
 };
