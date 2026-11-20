@@ -1,0 +1,376 @@
+'use strict';
+// File-system helpers for the search server (spec 9.6, SR-5, SR-9 b, SR-22 to SR-24).
+//
+// - The one path compare function of the server (SR-5).
+// - One-handle reads of regular files (SR-9 b).
+// - Atomic, link-safe writes: temp file in the same folder, created exclusively
+//   with mode 0600, fsync, rename over the target (SR-24).
+// - Leftover temp-file cleanup and POSIX permission checks (SR-22, SR-24).
+//
+// Errors carry a code only. No message ever holds file text.
+
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+const C = fs.constants;
+const O_NOFOLLOW = C.O_NOFOLLOW || 0; // not available on Windows
+const O_NONBLOCK = C.O_NONBLOCK || 0;
+const O_DIRECTORY = C.O_DIRECTORY || 0;
+
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+const TEMP_MAX_AGE_MS = 10 * 60 * 1000;
+// <name>.<pid>.<16 hex>.tmp, where <name> is one of the store's own file names.
+const TEMP_NAME_RE = /^[A-Za-z0-9_-]{1,40}(?:\.[A-Za-z0-9_-]{1,10})?\.[0-9]{1,10}\.[0-9a-f]{16}\.tmp$/;
+
+class FsxError extends Error {
+  constructor(code) {
+    super(code);
+    this.name = 'FsxError';
+    this.code = code;
+  }
+}
+
+function isWindows(platform) {
+  return platform === 'win32';
+}
+
+// ---------------------------------------------------------------------------
+// Path compare (SR-5). The only inside check of the server: every other module
+// calls this one.
+
+function pathApi(platform) {
+  return isWindows(platform) ? path.win32 : path.posix;
+}
+
+function foldForCompare(p, platform) {
+  let r = p;
+  // NFC only inside comparisons, and only on macOS (SR-1).
+  if (platform === 'darwin') r = r.normalize('NFC');
+  if (platform === 'win32' || platform === 'darwin') r = r.toLowerCase();
+  return r;
+}
+
+/**
+ * True when child is parent itself or sits inside it. Path-aware: a sibling
+ * `/x/ab` is not inside `/x/a`; a child folder named `..notes` is inside;
+ * another drive or a UNC path is not inside. Case-insensitive on Windows and
+ * macOS; NFC folded on macOS only.
+ */
+function isInside(child, parent, platform = process.platform) {
+  const P = pathApi(platform);
+  const c = foldForCompare(P.resolve(child), platform);
+  const p = foldForCompare(P.resolve(parent), platform);
+  const rel = P.relative(p, c);
+  if (rel === '') return true;
+  if (P.isAbsolute(rel)) return false;
+  if (rel === '..' || rel.startsWith('..' + P.sep)) return false;
+  return true;
+}
+
+function samePath(a, b, platform = process.platform) {
+  const P = pathApi(platform);
+  return foldForCompare(P.resolve(a), platform) === foldForCompare(P.resolve(b), platform);
+}
+
+// ---------------------------------------------------------------------------
+// Folder checks
+
+/**
+ * Null when dir is a real folder (not a link) whose real path equals the
+ * expected path; otherwise a problem code. The real-path compare also catches
+ * a junction that lstat does not report as a link (day-one check 17).
+ */
+function folderProblem(dir, expected, platform = process.platform) {
+  let st;
+  try {
+    st = fs.lstatSync(dir);
+  } catch (err) {
+    return err && err.code === 'ENOENT' ? 'missing' : 'unreadable';
+  }
+  if (st.isSymbolicLink()) return 'link';
+  if (!st.isDirectory()) return 'not_folder';
+  let real;
+  try {
+    real = fs.realpathSync.native(dir);
+  } catch (_) {
+    return 'unresolved';
+  }
+  if (!samePath(real, expected, platform)) return 'moved';
+  return null;
+}
+
+/**
+ * Create (if missing) the folder `name` inside the real folder `parentReal`,
+ * mode 0700 set explicitly on POSIX, then check it. Returns its path.
+ */
+function ensureDir(parentReal, name, platform = process.platform) {
+  const dir = path.join(parentReal, name);
+  try {
+    fs.mkdirSync(dir, { mode: DIR_MODE });
+  } catch (err) {
+    if (!err || err.code !== 'EEXIST') throw new FsxError('mkdir_failed');
+  }
+  const why = folderProblem(dir, dir, platform);
+  if (why) throw new FsxError('folder_' + why);
+  if (!isWindows(platform)) chmodNoFollow(dir, DIR_MODE, true);
+  return dir;
+}
+
+// ---------------------------------------------------------------------------
+// One-handle read (SR-9 b)
+
+/**
+ * Read a regular file through one handle. `expect` is the walk's BigInt lstat
+ * (dev and ino). Returns { buf } or { rule } where rule is a floor rule id:
+ * `link` (the handle is not the file the walk saw), `special_file`,
+ * `hard_link` or `too_big`. Throws on an open or read error (the caller counts
+ * it by error code).
+ */
+function readRegular(abs, expect, maxBytes) {
+  const fd = fs.openSync(abs, C.O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  try {
+    const st = fs.fstatSync(fd, { bigint: true });
+    if (!st.isFile()) return { rule: 'special_file' };
+    if (expect && (st.dev !== BigInt(expect.dev) || st.ino !== BigInt(expect.ino))) return { rule: 'link' };
+    if (st.nlink !== 1n) return { rule: 'hard_link' };
+    if (st.size > BigInt(maxBytes)) return { rule: 'too_big' };
+    const size = Number(st.size);
+    const buf = Buffer.alloc(Math.min(size, maxBytes) + 1);
+    let got = 0;
+    for (;;) {
+      const n = fs.readSync(fd, buf, got, buf.length - got, null);
+      if (n === 0) break;
+      got += n;
+      if (got > maxBytes) return { rule: 'too_big' }; // grew while reading
+      if (got === buf.length) break;
+    }
+    if (got > size) throw new FsxError('changed_during_read');
+    return { buf: buf.subarray(0, got) };
+  } finally {
+    try { fs.closeSync(fd); } catch (_) { /* already closed */ }
+  }
+}
+
+/** lstat, then a one-handle read of a small file we own (manifest, chunks, lock). */
+function readOwnFile(abs, maxBytes) {
+  let st;
+  try {
+    st = fs.lstatSync(abs, { bigint: true });
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return { absent: true };
+    throw new FsxError('stat_failed');
+  }
+  if (st.isSymbolicLink()) return { rule: 'link' };
+  if (!st.isFile()) return { rule: 'special_file' };
+  return readRegular(abs, { dev: st.dev, ino: st.ino }, maxBytes);
+}
+
+// ---------------------------------------------------------------------------
+// Atomic, link-safe write (SR-24)
+
+function writeAll(fd, buf) {
+  let off = 0;
+  while (off < buf.length) off += fs.writeSync(fd, buf, off, buf.length - off);
+}
+
+function fsyncDir(dir, platform) {
+  if (isWindows(platform)) return;
+  let fd = null;
+  try {
+    fd = fs.openSync(dir, C.O_RDONLY | O_DIRECTORY);
+    fs.fsyncSync(fd);
+  } catch (_) {
+    // best effort: some file systems refuse a folder fsync
+  } finally {
+    if (fd !== null) try { fs.closeSync(fd); } catch (_) { /* ignore */ }
+  }
+}
+
+function tempNameFor(name) {
+  return `${name}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+}
+
+/**
+ * Write `data` to `<dir>/<name>` atomically. Before writing: lstat the folder,
+ * refuse a link, refuse a real path that differs from `expectedDir`. The temp
+ * file is created exclusively (`wx`, 0600, O_NOFOLLOW where the OS has it),
+ * fsynced, then renamed over the target. On any failure after the temp file
+ * exists, it is unlinked before the error is thrown.
+ *
+ * opts.beforeRename: called after fsync; returning false aborts (lock lost).
+ * opts._tempName / opts._failAfterTemp: test-only seams.
+ */
+function atomicWrite({ dir, expectedDir, name, data, beforeRename, platform = process.platform, _tempName, _failAfterTemp }) {
+  const why = folderProblem(dir, expectedDir || dir, platform);
+  if (why) throw new FsxError('folder_' + why);
+  const buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), 'utf8');
+  const tmp = path.join(dir, _tempName || tempNameFor(name));
+  let fd = null;
+  let created = false;
+  try {
+    try {
+      fd = fs.openSync(tmp, C.O_WRONLY | C.O_CREAT | C.O_EXCL | O_NOFOLLOW, FILE_MODE);
+    } catch (err) {
+      throw new FsxError(err && err.code === 'EEXIST' ? 'temp_exists' : 'temp_create_failed');
+    }
+    created = true;
+    if (!isWindows(platform)) fs.fchmodSync(fd, FILE_MODE);
+    if (_failAfterTemp) throw new FsxError('forced_failure');
+    writeAll(fd, buf);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    if (beforeRename && beforeRename() === false) throw new FsxError('lock_lost');
+    fs.renameSync(tmp, path.join(dir, name));
+    created = false;
+    fsyncDir(dir, platform);
+  } catch (err) {
+    if (fd !== null) try { fs.closeSync(fd); } catch (_) { /* ignore */ }
+    if (created) try { fs.unlinkSync(tmp); } catch (_) { /* gone already */ }
+    if (err instanceof FsxError) throw err;
+    throw new FsxError('write_failed');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Leftover temp files (SR-24, SR-49 a)
+
+/**
+ * Remove this server's own leftover temp files from one folder: exact temp
+ * name pattern only, regular files only (a link is skipped, never followed),
+ * older than maxAgeMs by modified time (0 = any age). Never recursive. One
+ * failing entry never stops the rest.
+ */
+function cleanTemps(dir, { maxAgeMs = TEMP_MAX_AGE_MS, now = Date.now() } = {}) {
+  const out = { removed: 0, kept: 0, failed: 0 };
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (_) {
+    return out;
+  }
+  for (const n of names) {
+    if (!TEMP_NAME_RE.test(n)) continue;
+    try {
+      const p = path.join(dir, n);
+      const st = fs.lstatSync(p);
+      if (st.isSymbolicLink() || !st.isFile()) { out.kept++; continue; }
+      if (maxAgeMs > 0 && now - st.mtimeMs < maxAgeMs) { out.kept++; continue; }
+      fs.unlinkSync(p);
+      out.removed++;
+    } catch (_) {
+      out.failed++;
+    }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// POSIX permissions (SR-22). Windows: disclosed, not checked (SR-23).
+
+function chmodNoFollow(p, mode, isDir) {
+  // Open without following a link, then change the mode through the handle,
+  // so a link planted in our folder is never chmod-ed and its target is safe.
+  const fd = fs.openSync(p, C.O_RDONLY | O_NOFOLLOW | (isDir ? O_DIRECTORY : O_NONBLOCK));
+  try {
+    fs.fchmodSync(fd, mode);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function permProblem(st, wantMode, uid) {
+  if (st.uid !== uid) return 'not_owner';
+  if ((st.mode & 0o077) !== 0) return 'loose';
+  if ((st.mode & 0o777) !== wantMode) return 'loose';
+  return null;
+}
+
+/**
+ * Check the data root and the server's own items under it: the data root,
+ * `indexes/`, each index folder, and the files directly inside those folders.
+ * Each must be owned by the current user with no group or other bits. A loose
+ * item is tightened once (through a no-follow handle) and checked again. Links
+ * are skipped. Nothing outside the data root is touched. Never recursive
+ * beyond that fixed shape.
+ *
+ * Returns { ok, skipped, problems: [code], tightened }.
+ * opts.uid: test-only seam for the owner check.
+ */
+function checkPermissions(dataRoot, { platform = process.platform, uid } = {}) {
+  if (isWindows(platform)) {
+    return { ok: true, skipped: 'windows permissions are inherited from the profile folder and not checked', problems: [], tightened: 0 };
+  }
+  const me = uid !== undefined ? uid : (typeof process.getuid === 'function' ? process.getuid() : -1);
+  const problems = [];
+  let tightened = 0;
+
+  const visit = (p, isDir) => {
+    let st;
+    try { st = fs.lstatSync(p); } catch (_) { return; }
+    if (st.isSymbolicLink()) return;
+    if (isDir && !st.isDirectory()) return;
+    if (!isDir && !st.isFile()) return;
+    const want = isDir ? DIR_MODE : FILE_MODE;
+    let why = permProblem(st, want, me);
+    if (why === 'loose') {
+      try {
+        chmodNoFollow(p, want, isDir);
+        tightened++;
+        why = permProblem(fs.lstatSync(p), want, me);
+      } catch (_) {
+        why = 'tighten_failed';
+      }
+    }
+    if (why) problems.push(why);
+  };
+
+  const filesIn = (dir) => {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch (_) { return []; }
+    return names.map((n) => path.join(dir, n));
+  };
+
+  visit(dataRoot, true);
+  for (const p of filesIn(dataRoot)) {
+    let st;
+    try { st = fs.lstatSync(p); } catch (_) { continue; }
+    if (st.isSymbolicLink()) continue;
+    if (st.isFile()) visit(p, false);
+  }
+  const indexes = path.join(dataRoot, 'indexes');
+  visit(indexes, true);
+  for (const d of filesIn(indexes)) {
+    let st;
+    try { st = fs.lstatSync(d); } catch (_) { continue; }
+    if (st.isSymbolicLink() || !st.isDirectory()) continue;
+    visit(d, true);
+    for (const f of filesIn(d)) {
+      let fst;
+      try { fst = fs.lstatSync(f); } catch (_) { continue; }
+      if (fst.isSymbolicLink() || !fst.isFile()) continue;
+      visit(f, false);
+    }
+  }
+  return { ok: problems.length === 0, skipped: null, problems, tightened };
+}
+
+module.exports = {
+  FsxError,
+  DIR_MODE,
+  FILE_MODE,
+  TEMP_MAX_AGE_MS,
+  TEMP_NAME_RE,
+  isInside,
+  samePath,
+  folderProblem,
+  ensureDir,
+  readRegular,
+  readOwnFile,
+  atomicWrite,
+  cleanTemps,
+  checkPermissions,
+  tempNameFor,
+};

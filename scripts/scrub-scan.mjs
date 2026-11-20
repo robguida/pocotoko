@@ -48,6 +48,52 @@ function re(def, forceGlobal = true) {
   return new RegExp(def.pattern, forceGlobal ? withG(def.flags) : String(def.flags || '').replace('g', ''));
 }
 
+// A secret pattern whose value sits in a named group `value`; the `d` flag gives its span.
+function valueRe(def) {
+  const rx = re(def);
+  const d = rx.flags.includes('d') ? rx : new RegExp(rx.source, `${rx.flags}d`);
+  if (!/\(\?<value>/.test(d.source)) throw new Error('a secret pattern has no value group');
+  return d;
+}
+
+// True when line[start, end) is a whole placeholder shape (spec SR-13 b2, same shapes as the
+// search scan). A shape may run past `end` (a `<your password>` value holds a space, which ends
+// the value); then the character after the shape must end the value. A shape that ends before
+// `end` passes only when the rest is closing punctuation. A value that only starts like a
+// placeholder (`$`, `%`, `{`, `*`) is still a hit.
+const PLACEHOLDER_PEEK = 260;
+function isPlaceholderValue(c, line, start, end) {
+  const peek = line.slice(start, start + PLACEHOLDER_PEEK);
+  for (const rx of c.placeholders) {
+    const m = rx.exec(peek);
+    if (!m) continue;
+    const e = start + m[0].length;
+    if (e === end) return true;
+    if (e > end) {
+      const after = line[e];
+      if (after === undefined || /\s/.test(after) || `"'\``.includes(after) || c.closingPunct.includes(after)) return true;
+      continue;
+    }
+    let rest = true;
+    for (let j = e; j < end; j++) if (!c.closingPunct.includes(line[j])) { rest = false; break; }
+    if (rest) return true;
+  }
+  return false;
+}
+
+// One hit when any match's value is not a whole placeholder. The search restarts one
+// character after each exempt match, so an exempt value never hides a later real one.
+function valueHit(c, rx, line) {
+  rx.lastIndex = 0;
+  let m;
+  while ((m = rx.exec(line)) !== null) {
+    const span = m.indices && m.indices.groups && m.indices.groups.value;
+    if (!span || !isPlaceholderValue(c, line, span[0], span[1])) return true;
+    rx.lastIndex = m.index + 1;
+  }
+  return false;
+}
+
 function escapeRegex(text) {
   return text.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
 }
@@ -161,10 +207,16 @@ function loadRules(file) {
     return new RegExp(`${escapeRegex(v.prefix)}[${v.chars}]{${v.min},}`, 'g');
   });
   c.jwt = re(s.jwt);
-  c.conn = re(s.conn_string);
-  c.signed = re(s.signed_url);
+  if (!Array.isArray(s.placeholder_shapes) || s.placeholder_shapes.length === 0) throw new Error('placeholder_shapes missing');
+  c.placeholders = s.placeholder_shapes.map((d) => {
+    if (!d || typeof d.pattern !== 'string' || !d.pattern.startsWith('^')) throw new Error('a placeholder shape must be anchored with ^');
+    return re(d, false);
+  });
+  c.closingPunct = typeof s.placeholder_closing_punct === 'string' ? s.placeholder_closing_punct : '';
+  c.conn = valueRe(s.conn_string);
+  c.signed = valueRe(s.signed_url);
   c.webhook = s.webhook.map((d) => re(d));
-  c.setting = s.setting.map((d) => re(d));
+  c.setting = s.setting.map((d) => valueRe(d));
   c.auth = re(s.auth_header);
   c.random = { ...s.random, rx: re({ pattern: s.random.token_pattern, flags: s.random.flags }) };
 
@@ -316,10 +368,10 @@ function scanPublic(c, ctx, rel, text, opts = {}) {
     if ([...line.matchAll(c.keyBlock)].length) add(ln, 'secret-key-block');
     if (c.vendor.some((rx) => [...line.matchAll(rx)].length > 0)) add(ln, 'secret-vendor-token');
     if ([...line.matchAll(c.jwt)].length) add(ln, 'secret-jwt');
-    if ([...line.matchAll(c.conn)].length) add(ln, 'secret-conn-string');
-    if ([...line.matchAll(c.signed)].length) add(ln, 'secret-signed-url');
+    if (valueHit(c, c.conn, line)) add(ln, 'secret-conn-string');
+    if (valueHit(c, c.signed, line)) add(ln, 'secret-signed-url');
     if (c.webhook.some((rx) => [...line.matchAll(rx)].length > 0)) add(ln, 'secret-webhook');
-    if (c.setting.some((rx) => [...line.matchAll(rx)].length > 0)) add(ln, 'secret-setting');
+    if (c.setting.some((rx) => valueHit(c, rx, line))) add(ln, 'secret-setting');
     if ([...line.matchAll(c.auth)].length) add(ln, 'secret-auth-header');
     for (const m of line.matchAll(c.random.rx)) {
       const tok = m[0];

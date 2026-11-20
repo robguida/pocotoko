@@ -96,17 +96,27 @@
       { "prefix": "AIza", "min": 30, "chars": "A-Za-z0-9_-" }
     ],
     "jwt": { "pattern": "eyJ[A-Za-z0-9_-]{7,}\\.eyJ[A-Za-z0-9_-]{7,}\\.[A-Za-z0-9_-]*", "flags": "g" },
-    "conn_string": { "pattern": "(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{1,30}://(?![<$%{])[^\\s:/?#@'\"<>`]{1,256}:(?![<$%{*])[^\\s/?#@'\"<>`]{1,256}@", "flags": "g" },
-    "signed_url": { "pattern": "[?&#](?:X-Amz-Signature|X-Goog-Signature|sig|token|access_token|client_secret)=(?![<$%{*])[^\\s&#'\"<>`]+", "flags": "gi" },
+    "placeholder_about": "A value in a named group 'value' (conn_string, signed_url, setting) is exempt only when one whole shape below covers it, optionally followed by closing punctuation. Same shapes as the search scan (spec SR-13 b2). Each shape is matched at the value's start.",
+    "placeholder_shapes": [
+      { "pattern": "^<[^<>\\r\\n]{1,200}>" },
+      { "pattern": "^\\$\\{[^{}\\r\\n]{1,200}\\}" },
+      { "pattern": "^\\{\\{[^{}\\r\\n]{1,200}\\}\\}" },
+      { "pattern": "^%[A-Za-z_][A-Za-z0-9_]{0,200}%" },
+      { "pattern": "^\\$[A-Z_][A-Z0-9_]*" },
+      { "pattern": "^\\*+" }
+    ],
+    "placeholder_closing_punct": ".,;:!?)]}>",
+    "conn_string": { "pattern": "(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{1,30}://[^\\s:/?#@'\"<>`]{1,256}:(?<value>[^\\s/?#@'\"`]{1,256})@", "flags": "g" },
+    "signed_url": { "pattern": "[?&#](?:X-Amz-Signature|X-Goog-Signature|sig|token|access_token|client_secret)=(?<value>[^\\s&#'\"<>`]+)", "flags": "gi" },
     "webhook": [
       { "pattern": "hooks\\.slack\\.com/services/[A-Za-z0-9]", "flags": "gi" },
       { "pattern": "discord(?:app)?\\.com/api/webhooks/[0-9]", "flags": "gi" }
     ],
     "setting": [
-      { "pattern": "(?<![A-Za-z0-9])[A-Z0-9_]{0,64}(?:PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]{0,64}\\s*[:=]\\s*['\"]?(?![<$%{*`])[^\\s'\"`]{8,}", "flags": "g" },
-      { "pattern": "(?<![A-Za-z0-9_])(?:password|passwd|passphrase|client_secret|secret_key|api_key|apikey|access_token)\\s*[:=]\\s*['\"](?![<$%{*])[^'\"\\s]{8,}['\"]", "flags": "g" }
+      { "pattern": "(?<![A-Za-z0-9])[A-Z0-9_]{0,64}(?:PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]{0,64}\\s*[:=]\\s*['\"]?(?<value>[^\\s'\"`]{8,})", "flags": "g" },
+      { "pattern": "(?<![A-Za-z0-9_])(?:password|passwd|passphrase|client_secret|secret_key|api_key|apikey|access_token)\\s*[:=]\\s*['\"](?<value>[^'\"\\s]{8,})['\"]", "flags": "g" }
     ],
-    "auth_header": { "pattern": "Authorization\\s*:\\s*(?:Basic|Bearer)\\s+(?![<$%{*])[A-Za-z0-9._~+/=-]{8,}", "flags": "gi" },
+    "auth_header": { "pattern": "Authorization\\s*:\\s*(?:Basic|Bearer)\\s+[A-Za-z0-9._~+/=-]{8,}", "flags": "gi" },
     "random": {
       "token_pattern": "[A-Za-z0-9+/_=-]{32,}",
       "flags": "g",

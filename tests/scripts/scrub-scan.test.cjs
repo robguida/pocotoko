@@ -512,6 +512,41 @@ test('scanContent: import runs no command line; returns rule ids only; exemption
   assert.throws(() => mod.scanContent({ path: null, text: 'x', kind: 'message', layers: both, env: {} }), /deny-list not configured/);
 });
 
+// ---------- placeholders: whole shapes only (spec SR-13 b2, same shapes as the search scan) ----------
+
+test('placeholders: a value that only starts like a placeholder still hits (setting, connection string, signed URL)', async () => {
+  const { pathToFileURL } = require('node:url');
+  const mod = await import(pathToFileURL(SCRIPT).href);
+  const rulesOf = (text) => mod.scanContent({ path: 'p/x.txt', text, kind: 'file', layers: ['public'] }).map((h) => h.rule);
+  for (const value of F.placeholderLookalikes()) {
+    assert.ok(rulesOf(F.settingWith(value)).includes('secret-setting'), `setting value led by ${value[0]} should hit`);
+    assert.ok(rulesOf(F.connWith(value)).includes('secret-conn-string'), `conn password led by ${value[0]} should hit`);
+    assert.ok(rulesOf(F.signedWith(value)).includes('secret-signed-url'), `signed value led by ${value[0]} should hit`);
+  }
+  // An exempt match never hides a later real one on the same line.
+  const real = F.placeholderLookalikes()[0];
+  const shape = F.placeholderValues()[1];
+  assert.ok(rulesOf(`${F.connWith(shape)} ${F.connWith(real)}`).includes('secret-conn-string'));
+  assert.ok(rulesOf(`${F.settingWith(shape)} ${F.settingWith(real)}`).includes('secret-setting'));
+  // A shape with more text after it is not whole.
+  assert.ok(rulesOf(F.settingWith(`${shape}${F.gen(8, 4)}`)).includes('secret-setting'));
+});
+
+test('placeholders: each whole placeholder shape stays exempt (setting, connection string, signed URL)', async () => {
+  const { pathToFileURL } = require('node:url');
+  const mod = await import(pathToFileURL(SCRIPT).href);
+  const secretRules = (text) => mod.scanContent({ path: 'p/x.txt', text, kind: 'file', layers: ['public'] })
+    .map((h) => h.rule).filter((r) => r.startsWith('secret-'));
+  for (const value of F.placeholderValues()) {
+    assert.deepStrictEqual(secretRules(F.settingWith(value)), [], `setting ${value}`);
+    assert.deepStrictEqual(secretRules(`${F.settingWith(value)}.`), [], `setting ${value} with closing punctuation`);
+    assert.deepStrictEqual(secretRules(F.connWith(value)), [], `conn ${value}`);
+    assert.deepStrictEqual(secretRules(F.signedWith(value)), [], `signed ${value}`);
+  }
+  // A shape that holds a space may run past the value.
+  assert.deepStrictEqual(secretRules(F.settingWith('<your db password>')), []);
+});
+
 test('a 40,000-character line scans in bounded time (secret-setting label is length-capped)', async () => {
   const { pathToFileURL } = require('node:url');
   const mod = await import(pathToFileURL(SCRIPT).href);
