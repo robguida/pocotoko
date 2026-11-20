@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<NODE>",
+            "args": ["<KIT>/hooks/session-start.cjs"],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<NODE>",
+            "args": ["<KIT>/hooks/meter.cjs"],
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "\"<NODE>\" \"<KIT>/hooks/meter.cjs\" --statusline"
+  }
+}

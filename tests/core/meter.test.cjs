@@ -76,7 +76,7 @@ test('6.1: loading meter.cjs runs nothing (no stdin read, no exit, no output); t
 test('10.10 / 2.2: hooks.json registers UserPromptSubmit in exec form (row 1): top-level hooks key, command node, args under ${CLAUDE_PLUGIN_ROOT}/hooks/, timeout 5, no option in the launch', () => {
   const j = JSON.parse(fs.readFileSync(path.join(H.REPO_TOP, 'src', 'core', 'hooks', 'hooks.json'), 'utf8'));
   assert.deepEqual(Object.keys(j), ['hooks']);
-  // B2 registers this one event; B3 adds SessionStart (the consistency row then wants exactly two).
+  // B3 added SessionStart; consistency.test.cjs checks exactly two events.
   assert.ok(Array.isArray(j.hooks.UserPromptSubmit));
   const h = j.hooks.UserPromptSubmit[0].hooks[0];
   assert.deepEqual(h, { type: 'command', command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/hooks/meter.cjs'], timeout: 5 });

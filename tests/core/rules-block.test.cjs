@@ -1,8 +1,8 @@
 'use strict';
 // Spec 5.1, 5.2, 6.6, 14.3, 15.1: the model-routing skill and the rules block template.
-// This file covers only the routing-block rows of the consistency list. The full
-// tests/core/consistency.test.cjs (B3, after the probe) sits beside it and may either
-// keep this file or absorb its cases; nothing here depends on that file.
+// This file covers the routing-block rows of the consistency list in depth (wording, hard
+// lines); tests/core/consistency.test.cjs (B3) repeats the identity, line-limit and marker
+// checks against the block session-start.cjs extracts. Nothing here depends on that file.
 // Every banned-shape value is built at run time, so this source holds no literal.
 
 const test = require('node:test');
@@ -15,7 +15,9 @@ const SKILL = path.join(REPO_TOP, 'src', 'core', 'skills', 'model-routing', 'SKI
 const TEMPLATE = path.join(REPO_TOP, 'src', 'core', 'templates', 'rules-block.md');
 const START = '<!-- routing-block:start -->';
 const END = '<!-- routing-block:end -->';
-const YOURS_WIN = 'If your own rules file already sets model and effort rules, yours win.';
+// The real string is owned by session-start.cjs (B3); spec 5.1 b gives its wording.
+const { YOURS_WIN } = require('../../src/core/hooks/session-start.cjs');
+assert.equal(YOURS_WIN, 'If your own rules file already sets model and effort rules, yours win.');
 const VAR_BASE = ['CLAUDE', 'CODE', 'SUBAGENT', 'MODEL'].join('_');
 const VAR_FORCE = VAR_BASE + '_FORCE';
 const ALLOWED_URLS = ['https://code.claude.com/docs/en/sub-agents.md', 'https://code.claude.com/docs/en/prompt-caching.md'];

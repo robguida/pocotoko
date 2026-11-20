@@ -9,6 +9,8 @@ const crypto = require('node:crypto');
 const { makeTempDir, removeDir, REPO_TOP } = require('./tmpdir-sandbox.cjs');
 
 const METER_SRC = path.join(REPO_TOP, 'src', 'core', 'hooks', 'meter.cjs');
+const SESSION_START_SRC = path.join(REPO_TOP, 'src', 'core', 'hooks', 'session-start.cjs');
+const ROUTING_SKILL_SRC = path.join(REPO_TOP, 'src', 'core', 'skills', 'model-routing', 'SKILL.md');
 const FIXTURE = path.join(REPO_TOP, 'tests', 'fixtures', 'transcript-real-shape.jsonl');
 const IS_WIN = process.platform === 'win32';
 
@@ -40,22 +42,39 @@ function makeBase(name, { sub = null } = {}) {
   return { base, home, config, plugins, proj, tdir };
 }
 
-/** Plugin mode: the script copied into the plugin cache, the data folder created. */
+/**
+ * Plugin mode: both core scripts and the model-routing skill copied into the plugin cache
+ * (the plugin root holds hooks/ and skills/), the data folder created.
+ */
 function pluginKit(b) {
-  const hooks = mk(b.plugins, 'cache', 'mkt', 'kit', '0.1.0', 'hooks');
+  const root = mk(b.plugins, 'cache', 'mkt', 'kit', '0.1.0');
+  const hooks = mk(root, 'hooks');
   const scriptFile = path.join(hooks, 'meter.cjs');
   fs.copyFileSync(METER_SRC, scriptFile);
+  const startFile = path.join(hooks, 'session-start.cjs');
+  fs.copyFileSync(SESSION_START_SRC, startFile);
+  fs.copyFileSync(ROUTING_SKILL_SRC, path.join(mk(root, 'skills', 'model-routing'), 'SKILL.md'));
   const data = mk(b.plugins, 'data', 'kit-mkt');
-  return { scriptFile, stateRoot: data, data };
+  return { scriptFile, startFile, root, stateRoot: data, data };
 }
 
-/** Copy-by-hand mode: <kit>/hooks/meter.cjs; the state root is the kit folder. */
+/** Copy-by-hand mode: <kit>/hooks/meter.cjs and session-start.cjs; the state root is the kit folder. */
 function copyKit(b, folder = 'kit') {
   const kit = mk(b.base, folder);
   const hooks = mk(kit, 'hooks');
   const scriptFile = path.join(hooks, 'meter.cjs');
   fs.copyFileSync(METER_SRC, scriptFile);
-  return { scriptFile, stateRoot: kit, kit };
+  const startFile = path.join(hooks, 'session-start.cjs');
+  fs.copyFileSync(SESSION_START_SRC, startFile);
+  return { scriptFile, startFile, stateRoot: kit, kit };
+}
+
+/** Copy-by-hand: the model-routing skill copied to <config>/skills/model-routing/SKILL.md (12.2 step 2). */
+function copySkill(b, text = null) {
+  const file = path.join(mk(b.config, 'skills', 'model-routing'), 'SKILL.md');
+  if (text === null) fs.copyFileSync(ROUTING_SKILL_SRC, file);
+  else fs.writeFileSync(file, text);
+  return file;
 }
 
 function pluginEnv(b, kit, options = {}) {
@@ -150,8 +169,8 @@ function setMtime(file, msAgo, now = Date.now()) {
 }
 
 module.exports = {
-  METER_SRC, FIXTURE, FIXTURE_LINES, IS_WIN, REPO_TOP,
-  cleanup, mk, makeBase, pluginKit, copyKit, pluginEnv, copyEnv, ctxFor,
+  METER_SRC, SESSION_START_SRC, ROUTING_SKILL_SRC, FIXTURE, FIXTURE_LINES, IS_WIN, REPO_TOP,
+  cleanup, mk, makeBase, pluginKit, copyKit, copySkill, pluginEnv, copyEnv, ctxFor,
   assistantLine, transcriptText, writeTranscript, sessionId, promptInput,
   listing, dirLink, fileLink, setMtime,
 };
