@@ -527,7 +527,50 @@ test('T-16 (query part): 32 eight-letter words that each expand to the cap → n
   assert.equal(ctx.partial, true);
 });
 
-test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, each holding all 32 query words) → within the budget, or partial within the budget plus the 250 ms tail', () => {
+// CPU time of the thread running rank() (process.threadCpuUsage, where this
+// Node line has it), else of the whole process (process.cpuUsage, which also
+// counts the garbage collector's helper threads), in ms.
+const cpuNow = typeof process.threadCpuUsage === 'function' ? () => process.threadCpuUsage() : () => process.cpuUsage();
+const cpuSince = (a) => { const b = cpuNow(); return ((b.user - a.user) + (b.system - a.system)) / 1000; };
+
+/**
+ * Run rank() with a clock that records when the budget guard trips, and measure
+ * each span both by the wall clock and by the CPU time of the thread doing the
+ * work (cpuNow). Other processes loading the machine stretch the wall clock
+ * but not this thread's CPU time, so the smaller of the two is the work rank()
+ * itself did (B7 review). Returns
+ * { r, total: { wall, cpu }, tail: { wall, cpu } | null } in ms; `tail` runs
+ * from the first clock read at or past the budget (the guard trips there) to
+ * the return, and is null when no read ever reached the budget.
+ */
+function timedRank(idx, query, options) {
+  const budget = options.budgetMs === undefined ? R.QUERY_BUDGET_MS : options.budgetMs;
+  let start = null;
+  let trip = null;
+  const now = () => {
+    const t = Date.now();
+    if (start === null) start = t; // rank() reads the clock first for its start
+    else if (trip === null && t - start >= budget) trip = { wall: t, cpu: cpuNow() };
+    return t;
+  };
+  const cpu0 = cpuNow();
+  const wall0 = Date.now();
+  const r = R.rank(idx, query, { ...options, now });
+  const wall1 = Date.now();
+  const cpuTotal = cpuSince(cpu0);
+  return {
+    r,
+    total: { wall: wall1 - wall0, cpu: cpuTotal },
+    tail: trip ? { wall: wall1 - trip.wall, cpu: cpuSince(trip.cpu) } : null,
+  };
+}
+
+/** The smaller of the wall-clock and own-CPU measure of a span. */
+function own(span) {
+  return Math.min(span.wall, span.cpu);
+}
+
+test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, each holding all 32 query words) → within the budget, or partial within the budget plus the 250 ms tail', (t) => {
   const TAIL_MS = 250; // spec 9.5 query handling (SR-28)
   const HARD_STOP = 50000; // spec 9.11: chunks per project, hard stop
   const letters = 'abcdefghijklmnopqrstuvwxyz';
@@ -539,24 +582,36 @@ test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, e
   idx.prepare();
   const query = q(text);
   assert.equal(query.words.length, 32);
+  const show = (m) => `wall ${m.wall} ms, cpu ${Math.round(m.cpu)} ms`;
+  // Robust to machine load (B7 review): a partial result must come from the
+  // budget guard (a clock read past the budget), the time from that read to
+  // the return is the 250 ms ordering tail, and the whole call fits the
+  // budget plus the tail; each by the wall clock or by the working thread's
+  // CPU time, whichever is smaller. A loop that stops checking the budget
+  // runs seconds past it in CPU time too, so it still fails.
   for (const matching of ['exact', 'broad']) {
-    const t0 = Date.now();
-    const r = R.rank(idx, query, { matching });
-    const took = Date.now() - t0;
-    if (r.partial) assert.ok(took <= R.QUERY_BUDGET_MS + TAIL_MS, `${matching}: partial after ${took} ms`);
-    else assert.ok(took <= R.QUERY_BUDGET_MS, `${matching}: ${took} ms`);
-    assert.equal(r.results.length, 5);
-    for (const res of r.results) assert.deepEqual(res.matched_by, ['exact'], matching);
+    const m = timedRank(idx, query, { matching });
+    t.diagnostic(`${matching}: partial ${m.r.partial}; total ${show(m.total)}; tail ${m.tail ? show(m.tail) : 'none'}`);
+    if (m.r.partial) {
+      assert.ok(m.tail, `${matching}: partial, but no clock read reached the budget`);
+      assert.ok(own(m.tail) <= TAIL_MS, `${matching}: tail after the budget ran out measured ${show(m.tail)}`);
+      assert.ok(own(m.total) <= R.QUERY_BUDGET_MS + TAIL_MS, `${matching}: partial, total measured ${show(m.total)}`);
+    } else {
+      assert.equal(m.tail, null, `${matching}: a clock read reached the budget, but the result is not partial`);
+      assert.ok(own(m.total) <= R.QUERY_BUDGET_MS, `${matching}: not partial, total measured ${show(m.total)}`);
+    }
+    assert.equal(m.r.results.length, 5);
+    for (const res of m.r.results) assert.deepEqual(res.matched_by, ['exact'], matching);
   }
   // The budget runs out inside the exact pass itself: partial at once, holding the exact hits scored so far.
   for (const matching of ['exact', 'broad']) {
-    const t0 = Date.now();
-    const r = R.rank(idx, query, { matching, budgetMs: 0 });
-    const took = Date.now() - t0;
-    assert.equal(r.partial, true, matching);
-    assert.ok(took <= TAIL_MS, `${matching}: ${took} ms with no budget`);
-    assert.equal(r.results.length, 5);
-    for (const res of r.results) assert.deepEqual(res.matched_by, ['exact'], matching);
+    const m = timedRank(idx, query, { matching, budgetMs: 0 });
+    t.diagnostic(`${matching}, 0 ms budget: total ${show(m.total)}`);
+    assert.equal(m.r.partial, true, matching);
+    assert.ok(m.tail, matching + ': the guard tripped');
+    assert.ok(own(m.total) <= TAIL_MS, `${matching}: with no budget, total measured ${show(m.total)}`);
+    assert.equal(m.r.results.length, 5);
+    for (const res of m.r.results) assert.deepEqual(res.matched_by, ['exact'], matching);
   }
 });
 

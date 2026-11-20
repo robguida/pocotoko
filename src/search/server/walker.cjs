@@ -73,7 +73,8 @@ function bump(map, key) {
  * `failed` counts visited files only (so skipped + failed + accepted files =
  * visited); a folder that cannot be listed or checked goes in `failedDirs`.
  *
- * opts: { filter, ignore, maxEntries, hooks }.
+ * opts: { filter, ignore, maxEntries, hooks }. hooks.onSkip(rel, rule, isDir)
+ * is told of each skip by name (used only by the terminal skip report, SR-33).
  */
 async function walk(rootReal, { filter, ignore = null, maxEntries = MAX_ENTRIES, hooks = {} } = {}) {
   const out = { files: [], visited: 0, skipped: {}, skippedDirs: {}, failed: {}, failedDirs: {}, incomplete: null };
@@ -124,7 +125,11 @@ async function walk(rootReal, { filter, ignore = null, maxEntries = MAX_ENTRIES,
         if (unsafeName(rel)) rule = R.UNSAFE_NAME;
         else rule = floor.folderRule(filter, name, rel);
         if (!rule && ignore && ignore.isIgnored(rel, true)) rule = R.GIT_IGNORED;
-        if (rule) { bump(out.skippedDirs, rule); continue; }
+        if (rule) {
+          bump(out.skippedDirs, rule);
+          if (hooks.onSkip) hooks.onSkip(rel, rule, true);
+          continue;
+        }
         subdirs.push({ abs, rel, expectedReal: path.join(real, name) });
         continue;
       }
@@ -137,7 +142,11 @@ async function walk(rootReal, { filter, ignore = null, maxEntries = MAX_ENTRIES,
       if (!rule && ignore && ignore.isIgnored(rel, false)) rule = R.GIT_IGNORED;
       if (!rule && st.nlink > 1n) rule = R.HARD_LINK;
       if (!rule && st.size > BigInt(filter.maxFileBytes)) rule = R.TOO_BIG;
-      if (rule) { bump(out.skipped, rule); continue; }
+      if (rule) {
+        bump(out.skipped, rule);
+        if (hooks.onSkip) hooks.onSkip(rel, rule, false);
+        continue;
+      }
       out.files.push({
         rel,
         abs,

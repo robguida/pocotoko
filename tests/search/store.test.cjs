@@ -459,6 +459,106 @@ test('a corrupt index is deleted and rebuilt; only that project\'s index folder 
   assert.equal(store.rank('deploy').results.length, 1);
 });
 
+// B7 review: a throw while the stored index is built in memory.
+const LOAD_N = 10;
+
+/** A built index of LOAD_N one-chunk files, each with its own word. */
+async function tenChunkRun(tag) {
+  const files = {};
+  const words = [];
+  for (let i = 0; i < LOAD_N; i++) {
+    // Random letters, far apart, so broad matching finds only its own note.
+    const w = 'zq' + [...crypto.randomBytes(12)].map((b) => String.fromCharCode(97 + (b % 26))).join('');
+    words.push(w);
+    files[`n${i}.md`] = `# Note ${i}\n\n${w} here.\n`;
+  }
+  const run = makeRun(tag, files);
+  const s = openStore(run);
+  await s.refresh();
+  assert.equal(s.status().chunks, LOAD_N);
+  return { run, words };
+}
+
+/** onLoadRecord that throws on record `at` (from 1): on the first load only, or on every load. */
+function throwAt(at, every) {
+  let n = 0; // records seen in the current load
+  let loads = 0; // loads ended so far (by a throw or in full)
+  return () => {
+    n++;
+    if (n === at && (every || loads === 0)) {
+      n = 0;
+      loads++;
+      throw new Error('injected load throw');
+    }
+    if (n === LOAD_N) { n = 0; loads++; }
+  };
+}
+
+function assertNoPathOrTerm(store, run, words) {
+  const s = store.status();
+  const text = JSON.stringify({ rebuild: s.rebuild, reason: s.reason, warnings: s.warnings });
+  assert.ok(!text.includes(run.proj) && !text.includes(path.basename(run.base)), 'no path in any reason');
+  for (const w of words) assert.ok(!text.includes(w), 'no term in any reason');
+}
+
+async function assertFullAfterRefresh(store, words) {
+  await store.refresh();
+  assert.equal(store.state(), 'fresh');
+  assert.equal(store.status().chunks, LOAD_N);
+  words.forEach((w, i) => {
+    const res = store.rank(w).results;
+    assert.equal(res.length, 1, 'search finds chunk ' + i);
+    assert.equal(res[0].path, `n${i}.md`);
+  });
+}
+
+for (const way of ['background', 'synchronous']) {
+  for (const every of [false, true]) {
+    test(`B7 review: a throw while the stored index loads (${way}, ${every ? 'every load' : 'first load only'}) never ends at fresh with a chunk missing`, async () => {
+      const { run, words } = await tenChunkRun((way === 'background' ? 'bg' : 'sy') + (every ? 'every' : 'once'));
+      for (const at of [1, 4, LOAD_N]) {
+        const hooks = { onLoadRecord: throwAt(at, every) };
+        let store;
+        if (way === 'background') {
+          store = St.createStore({ dataRoot: run.data, rootReal: run.proj, options: {}, globalExcludes: null, gitCeiling: run.base, hooks });
+          assert.equal(await store.openInBackground(), 'rebuilding', `at ${at}: the load is caught, not rejected`);
+        } else {
+          store = openStore(run, { hooks });
+        }
+        assert.equal(store.state(), 'rebuilding', `at ${at}`);
+        const s = store.status();
+        assert.equal(s.chunks, 0, `at ${at}: nothing half-loaded stays in memory`);
+        assert.equal(s.files, 0, `at ${at}`);
+        assert.deepEqual(s.rebuild, { reason: 'corrupt', done: false });
+        assert.throws(() => store.rank(words[0]), { name: 'IndexRebuilding' });
+        assertNoPathOrTerm(store, run, words);
+        await assertFullAfterRefresh(store, words);
+        if (every) {
+          // The lock holder hit the throw again: the folder was emptied and the
+          // index rebuilt from source, said once.
+          const r = await store.search(words[0]);
+          assert.equal(r.notice, 'index rebuilt from source: corrupt');
+          assert.equal(r.results.length, 1);
+        }
+      }
+    });
+  }
+}
+
+test('B7 review: a background load that rejects for any other reason leaves nothing in memory and a full rebuild recorded', async () => {
+  const { run, words } = await tenChunkRun('reject');
+  const store = St.createStore({
+    dataRoot: run.data, rootReal: run.proj, options: {}, globalExcludes: null, gitCeiling: run.base,
+    hooks: { afterLoad: () => { throw new Error('injected after load'); } },
+  });
+  await assert.rejects(store.openInBackground(), /injected after load/);
+  assert.equal(store.state(), 'rebuilding');
+  assert.equal(store.status().chunks, 0);
+  assert.deepEqual(store.status().rebuild, { reason: 'corrupt', done: false });
+  assertNoPathOrTerm(store, run, words);
+  await assertFullAfterRefresh(store, words);
+});
+
 // ---------------------------------------------------------------------------
 // Stat pass (9.7)
 

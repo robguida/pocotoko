@@ -38,6 +38,10 @@ const LOCK_STALE_MS = 120 * 1000;
 const MAX_OWN_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_LOCK_BYTES = 4096;
 const YIELD_EVERY_FILES = 16;
+// Loading a stored index in the background (openInBackground): the work is cut
+// into slices of about this many milliseconds, so the server answers protocol
+// messages (initialize, tools/list) between them (SR-46, B7 review).
+const LOAD_SLICE_MS = 10;
 const PROCESS_START = Date.now();
 
 const MANIFEST = 'manifest.json';
@@ -63,6 +67,27 @@ function sha256(buf) {
 
 function yieldNow() {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+/** Run a step generator to its end at once and return its value. */
+function drain(gen) {
+  let r = gen.next();
+  while (!r.done) r = gen.next();
+  return r.value;
+}
+
+/** Run a step generator in slices of about LOAD_SLICE_MS, yielding to the event loop between slices. */
+async function drainInSlices(gen) {
+  let last = Date.now();
+  let r = gen.next();
+  while (!r.done) {
+    if (Date.now() - last >= LOAD_SLICE_MS) {
+      await yieldNow();
+      last = Date.now();
+    }
+    r = gen.next();
+  }
+  return r.value;
 }
 
 /** Folder name of a project's index: the first 16 hex of the SHA-256 of its real path (SR-20). */
@@ -125,7 +150,8 @@ function bump(map, key, n = 1) {
  *   dataRoot, rootReal, options (raw user options), globalExcludes,
  *   gitCeiling (test-only seam: where the upward .git search stops),
  *   limits (test-only seam), clock { now }, identity { pid, start } (test-only),
- *   hooks { beforeOpen, beforeUpsert, beforeWrite, failWriteAfterTemp, scanThrowOn, afterFolder },
+ *   hooks { beforeOpen, beforeUpsert, beforeWrite, failWriteAfterTemp, scanThrowOn, afterFolder,
+ *           beforeLoad, onLoadRecord, afterLoad } (all test-only),
  *   platform, uid (test-only seam for the owner check),
  *   rulesVersion (test-only: stands in for floor.RULES_VERSION),
  *   ignorePlatform (test-only: the platform the ignore matcher folds case for)
@@ -152,12 +178,14 @@ function createStore(opts) {
     pendingWrite: false, // a write that was needed but did not land; retried by the next run (SR-25)
     notice: null, // one-time line for the next search result
     running: null,
+    opening: null, // the background load of openInBackground(), while it runs
     lastRefresh: null,
     lastRun: null,
     warnings: [],
     folderChecks: null,
     lock: { held: false, lastTouch: 0 },
     counters: { reads: 0, hashes: 0, scans: 0, writes: 0 },
+    indexedAt: null, // when the index in memory was last written (or the loaded manifest's built_at)
   };
   let filter = floor.buildFilter(options);
   // Query-time options (matching, word_families, synonyms): they act on the
@@ -263,8 +291,14 @@ function createStore(opts) {
     return { buf: r.buf };
   }
 
-  /** Read and check the files on disk: { status: 'empty' | 'loaded' | reason, man, recs }. */
-  function readIndex() {
+  /**
+   * Read and check the files on disk: { status: 'empty' | 'loaded' | reason, man, recs }.
+   * A step generator: it yields between steps (and after each stored line), so
+   * a caller may run it at once (load) or in slices (openInBackground). The
+   * two file reads stay one step each: fsx.readOwnFile is the one-handle read
+   * with its checks, and it is synchronous.
+   */
+  function* readIndexSteps() {
     let m;
     let c;
     try {
@@ -275,6 +309,7 @@ function createStore(opts) {
     }
     if (m.absent && c.absent) return { status: 'empty' };
     if (m.absent || c.absent || m.corrupt || c.corrupt) return { status: 'corrupt' };
+    yield;
     let man;
     try {
       man = JSON.parse(m.buf.toString('utf8'));
@@ -286,7 +321,9 @@ function createStore(opts) {
     if (man.tokenizer_version !== tokenize.TOK_VERSION) return { status: 'tokenizer_changed' };
     if (man.rules_version !== rulesVersion) return { status: 'rules_changed' };
     if (man.options_hash !== filter.optionsHash) return { status: 'options_changed' };
+    yield;
     if (man.chunks_sha256 !== sha256(c.buf)) return { status: 'corrupt' };
+    yield;
     const recs = new Map();
     try {
       const text = c.buf.toString('utf8');
@@ -297,6 +334,7 @@ function createStore(opts) {
           || !Object.prototype.hasOwnProperty.call(man.files, r.path)) throw namedError('corrupt');
         if (!recs.has(r.path)) recs.set(r.path, []);
         recs.get(r.path).push(r);
+        yield;
       }
     } catch (_) {
       return { status: 'corrupt' };
@@ -313,18 +351,45 @@ function createStore(opts) {
    * what it saw may be a writer caught between its two renames. Only the lock
    * holder (`locked`) empties the folder, and it reads the files again first.
    */
-  function load({ locked = false } = {}) {
+  function load(opts) {
+    return drain(loadSteps(opts));
+  }
+
+  /** load() as a step generator (see readIndexSteps). */
+  function* loadSteps({ locked = false } = {}) {
     resetMemory();
-    const r = readIndex();
+    let r = yield* readIndexSteps();
     if (r.status === 'loaded') {
-      manifest = { files: r.man.files };
-      records = r.recs;
-      for (const list of records.values()) for (const rec of list) index.add(rec);
-      index.prepare(); // sorted words and length buckets ready before the first query
-      st.everBuilt = true;
-      // A rebuild only recorded (never started) is not needed any more.
-      if (st.rebuild && !st.rebuild.done && !st.rebuild.reset) st.rebuild = null;
-      return 'loaded';
+      // A throw while the in-memory index is built (B7 review) must never leave
+      // part of it behind: `records` and `manifest` would list every file while
+      // the index held only some chunks, and the next refresh would see every
+      // file as unchanged and report `fresh` with chunks missing. Memory is
+      // emptied and the index is treated as corrupt, so it is rebuilt in full.
+      let built = false;
+      try {
+        manifest = { files: r.man.files };
+        records = r.recs;
+        st.indexedAt = Number.isFinite(r.man.built_at) ? r.man.built_at : null;
+        for (const list of records.values()) {
+          for (const rec of list) {
+            if (hooks.onLoadRecord) hooks.onLoadRecord(); // test-only: a slow load, or a throw
+            index.add(rec);
+            yield;
+          }
+        }
+        index.prepare(); // sorted words and length buckets ready before the first query
+        built = true;
+      } catch (_) {
+        resetMemory();
+        st.indexedAt = null;
+      }
+      if (built) {
+        st.everBuilt = true;
+        // A rebuild only recorded (never started) is not needed any more.
+        if (st.rebuild && !st.rebuild.done && !st.rebuild.reset) st.rebuild = null;
+        return 'loaded';
+      }
+      r = { status: 'corrupt' };
     }
     if (r.status === 'empty') return 'empty';
     let reset = false;
@@ -474,6 +539,7 @@ function createStore(opts) {
     fsx.atomicWrite({ ...common, name: CHUNKS, data: chunksBuf, _failAfterTemp: !!hooks.failWriteAfterTemp });
     fsx.atomicWrite({ ...common, name: MANIFEST, data: JSON.stringify(man) });
     st.counters.writes++;
+    st.indexedAt = man.built_at;
   }
 
   // -------------------------------------------------------------------------
@@ -650,6 +716,37 @@ function createStore(opts) {
     return state();
   }
 
+  /**
+   * open() for the server (SR-46, B7 review): the folder checks run now; the
+   * stored index is then loaded in the background, in slices of about
+   * LOAD_SLICE_MS, so protocol messages are answered while a large index
+   * loads. The state is `building` until it has loaded, and a refresh started
+   * meanwhile waits for the load. Returns a promise of the state.
+   */
+  function openInBackground() {
+    if (!ensureFolders()) return Promise.resolve(state());
+    if (hooks.beforeLoad) hooks.beforeLoad(); // test-only seam
+    const p = drainInSlices(loadSteps()) // without the lock: reads only (SR-49 a)
+      .then(() => {
+        if (hooks.afterLoad) hooks.afterLoad(); // test-only seam: a load that rejects
+        st.loaded = true;
+        return state();
+      })
+      .catch((err) => {
+        // Any other throw in the load: nothing half-loaded stays in memory, and
+        // a full rebuild is recorded, so no later refresh can report `fresh`
+        // from it. The rejection still reaches the caller (the server turns it
+        // into a fixed reason, 9.7).
+        resetMemory();
+        st.indexedAt = null;
+        st.rebuild = { reason: 'corrupt', done: false, reset: false };
+        throw err;
+      })
+      .finally(() => { if (st.opening === p) st.opening = null; });
+    st.opening = p;
+    return p;
+  }
+
   function state() {
     const off = isOff();
     if (off) return 'off';
@@ -662,7 +759,10 @@ function createStore(opts) {
   /** The refresh tool: one at a time (SR-34). */
   function refresh() {
     if (st.running) return Promise.resolve({ already: true });
-    st.running = runRefresh().finally(() => { st.running = null; });
+    // A refresh asked for while the stored index still loads runs after the load.
+    const opening = st.opening;
+    const run = opening ? opening.catch(() => {}).then(() => runRefresh()) : runRefresh();
+    st.running = run.finally(() => { st.running = null; });
     return st.running;
   }
 
@@ -714,6 +814,68 @@ function createStore(opts) {
     return list.find((r) => r.key === key) || null;
   }
 
+  /**
+   * `get` re-checks its own file (9.7): re-stat it, re-test it and every folder
+   * above it against the floor and the options (names, links, git-ignore, hard
+   * links, size), and re-hash it when its size or modified time changed.
+   * Returns { ok: true } or { ok: false, why } (why is a fixed code).
+   */
+  function recheck(rel) {
+    const no = (why) => ({ ok: false, why });
+    try {
+      const prev = typeof rel === 'string' ? manifest.files[rel] : undefined;
+      if (!prev) return no('not_indexed');
+      const parts = rel.split('/');
+      if (parts.some((p) => p === '' || p === '.' || p === '..')) return no('bad_path');
+      if (walker.unsafeName(rel)) return no(floor.RULES.UNSAFE_NAME);
+      const ig = ignoreMod.createIgnore(rootReal, { globalExcludes: opts.globalExcludes, ceiling: opts.gitCeiling, platform: opts.ignorePlatform });
+      if (ig.ignoreAll) return no(floor.RULES.GIT_IGNORED);
+      ig.loadFolder('', rootReal);
+      let dirAbs = rootReal;
+      let dirReal = rootReal;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const name = parts[i];
+        const relDir = parts.slice(0, i + 1).join('/');
+        const abs = path.join(dirAbs, name);
+        const s = fs.lstatSync(abs);
+        if (s.isSymbolicLink() || !s.isDirectory()) return no(floor.RULES.LINK);
+        const real = fs.realpathSync.native(abs);
+        if (!fsx.samePath(real, path.join(dirReal, name), platform)) return no(floor.RULES.LINK);
+        const rule = floor.folderRule(filter, name, relDir);
+        if (rule) return no(rule);
+        if (ig.isIgnored(relDir, true)) return no(floor.RULES.GIT_IGNORED);
+        ig.loadFolder(relDir, abs);
+        dirAbs = abs;
+        dirReal = real;
+      }
+      const name = parts[parts.length - 1];
+      const abs = path.join(dirAbs, name);
+      const s = fs.lstatSync(abs, { bigint: true });
+      if (s.isSymbolicLink()) return no(floor.RULES.LINK);
+      if (!s.isFile()) return no(floor.RULES.SPECIAL);
+      const fr = floor.fileRule(filter, name, rel);
+      if (fr) return no(fr);
+      if (ig.isIgnored(rel, false)) return no(floor.RULES.GIT_IGNORED);
+      if (s.nlink > 1n) return no(floor.RULES.HARD_LINK);
+      if (s.size > BigInt(filter.maxFileBytes)) return no(floor.RULES.TOO_BIG);
+      const size = Number(s.size);
+      const mtimeNs = s.mtimeNs.toString();
+      if (size === prev.size && mtimeNs === prev.mtimeNs) return { ok: true };
+      const got = walker.readFile({ rel, abs, size, dev: s.dev, ino: s.ino }, { filter });
+      if (got.rule) return no(got.rule);
+      if (got.fail) return no('read_failed');
+      if (got.sha256 !== prev.sha256) return no('changed');
+      return { ok: true };
+    } catch (_) {
+      return no('gone');
+    }
+  }
+
+  /** Release the lock if this process holds it (the session is ending). */
+  function close() {
+    if (st.lock.held) releaseLock();
+  }
+
   /** Totals only (SR-32). */
   function status() {
     const run = st.lastRun || {};
@@ -744,6 +906,7 @@ function createStore(opts) {
 
   return {
     open,
+    openInBackground,
     load,
     upsert,
     purge,
@@ -753,8 +916,11 @@ function createStore(opts) {
     idle,
     search,
     getChunk,
+    recheck,
+    close,
     status,
     state,
+    get indexedAt() { return st.indexedAt; },
     get indexDir() { return st.indexDir; },
     get dataReal() { return st.dataReal; },
     get counters() { return { ...st.counters }; },
@@ -767,6 +933,7 @@ module.exports = {
   SCHEMA_VERSION,
   LIMITS,
   STAT_BUDGET_MS,
+  LOAD_SLICE_MS,
   LOCK_REFRESH_MS,
   LOCK_STALE_MS,
   INCOMPLETE_LINE,

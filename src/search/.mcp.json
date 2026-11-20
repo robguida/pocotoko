@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "pocotoko-search": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/server.cjs"],
+      "env": {
+        "SEARCH_OPTION_PROJECTS": "${user_config.projects}",
+        "SEARCH_OPTION_MATCHING": "${user_config.matching}",
+        "SEARCH_OPTION_WORD_FAMILIES": "${user_config.word_families}",
+        "SEARCH_OPTION_EXTRA_TYPES": "${user_config.extra_types}",
+        "SEARCH_OPTION_NEVER_FOLDERS": "${user_config.never_folders}",
+        "SEARCH_OPTION_NEVER_GLOBS": "${user_config.never_globs}",
+        "SEARCH_OPTION_NEVER_TERMS": "${user_config.never_terms}",
+        "SEARCH_OPTION_SYNONYMS": "${user_config.synonyms}",
+        "SEARCH_OPTION_DROP_CONTACTS": "${user_config.drop_contacts}",
+        "SEARCH_OPTION_MAX_FILE_BYTES": "${user_config.max_file_bytes}"
+      }
+    }
+  }
+}
