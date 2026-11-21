@@ -27,7 +27,7 @@ Four things come with it:
 - Node.js 22 or newer, on your `PATH` (check with `node -v`).
 - Claude Code 2.1.329 or later. That is the version this kit was tested on, and both plugin manifests declare it as their floor (the `engines` field).
 - The one-command install form below needs Claude Code 2.1.292 or later from the shell. The tested floor above is the higher of the two.
-- Windows, macOS and Linux are all targets. Only Windows has been run so far (see "Not yet proven").
+- Windows, macOS and Linux are all targets. The tests and checks have been run on all three systems, each on Node 22, 24 and 26.
 
 ## Install
 
@@ -104,7 +104,6 @@ These are stated as open, not as fact.
 - Claude Code starting the real search server itself. The live checks used small stand-in servers. They showed how options reach a plugin's server, that such a server is given the folder the session started in, and that a planted `node` program did not run. In the checks, a stand-in server's never-set text option with a default got that default; for search that would apply to `matching` and `word_families`. Whether an option with no default that you never set (`projects`, `extra_types`, `never_folders`, `never_globs`, `never_terms`, `synonyms`) stops it from starting has not been seen.
 - Whether a never-set `drop_contacts` or `max_file_bytes` (options with a default that are not text) stops the search server from starting, and what value it then gets, has not been seen.
 - The install lines above, run against the host repository. Neither install form has been tried from it yet.
-- A run on macOS and Linux, and on Node 22 and 26. Only Windows with Node 24 has been run so far.
 - In a plugin install, the form a list option takes at the server when you set it through the interactive `/plugin configure` form. In the checks, a list stored as one comma-separated line or as JSON-array text reached a plugin's server as stored. If the interactive form stores it differently, `projects` fails closed (search stays off), but the never-lists (`never_terms`, `never_folders`, `never_globs`) would not narrow anything. Until this and the next item are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
 - In a plugin install, when you change some options with `claude plugin configure`, whether the options you did not name are kept has not been seen. If they were dropped, a never-list could stop narrowing. Until this and the interactive form are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
 - Whether the plugin cache folder variable (`CLAUDE_CODE_PLUGIN_CACHE_DIR`) reaches the search server when the cache is really moved to another place. In the checks it reached a plugin's server unchanged, but it was set to the default place there.
