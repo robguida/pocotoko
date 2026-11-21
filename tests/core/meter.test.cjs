@@ -578,6 +578,61 @@ test('6.6 / SR-C6 (L-3): a handoff_dir inside the config folder (the folder itse
   assert.deepEqual(M.resolveHandoffDir(sibling, { configDir: cfgReal, gitCeiling: b.base }), { dir: sibling });
 });
 
+test('6.6 (end gate round 1, N-1): a handoff_dir whose written form is inside the project, the start folder or the config folder is refused before any link in it is resolved; a link from outside into them is still refused on its real path', () => {
+  const b = H.makeBase('hdir-text');
+  const cwdDir = H.mk(b.base, 'started-here');
+  const recording = () => {
+    const calls = [];
+    const fn = (x) => { calls.push(x); throw Object.assign(new Error('must not be called'), { code: 'EACCES' }); };
+    return { calls, fn };
+  };
+  // The written value need not exist: a link there would never be followed.
+  for (const [label, value] of [
+    ['inside the project', path.join(b.proj, 'link-to-share')],
+    ['the project itself', b.proj],
+    ['inside the start folder', path.join(cwdDir, 'a', 'b')],
+    ['inside the config folder', path.join(b.config, 'commands')],
+  ]) {
+    const seam = recording();
+    assert.deepEqual(M.resolveHandoffDir(value, { projectDir: b.proj, cwd: cwdDir, configDir: b.config, gitCeiling: b.base, _realpath: seam.fn }), { refused: true }, label);
+    assert.deepEqual(seam.calls, [], label + ': refused before the real-path step');
+  }
+  // The project named through a link: the value under the link's own written form is
+  // refused before the real-path step too, not only under the project's real path.
+  const projLink = H.dirLink(b.proj, path.join(b.base, 'proj-link'));
+  const viaLink = recording();
+  assert.deepEqual(M.resolveHandoffDir(path.join(projLink, 'notes'), { projectDir: projLink, cwd: '', gitCeiling: b.base, _realpath: viaLink.fn }), { refused: true });
+  assert.deepEqual(viaLink.calls, [], 'the project named through a link: refused before the real-path step');
+  // Outside all three: the real-path step runs.
+  const seam = recording();
+  assert.deepEqual(M.resolveHandoffDir(path.join(b.base, 'elsewhere'), { projectDir: b.proj, cwd: cwdDir, configDir: b.config, gitCeiling: b.base, _realpath: seam.fn }), { refused: true });
+  assert.equal(seam.calls.length, 1, 'outside: resolved as before');
+  // A link from outside into the project: the written form passes, the real path refuses it.
+  const inProj = H.mk(b.proj, 'notes');
+  const link = H.dirLink(inProj, path.join(b.base, 'outside-link'));
+  assert.deepEqual(M.resolveHandoffDir(link, { projectDir: b.proj, cwd: cwdDir, configDir: b.config, gitCeiling: b.base }), { refused: true });
+  // A good folder is still used.
+  const good = H.mk(b.base, 'good notes');
+  assert.deepEqual(M.resolveHandoffDir(good, { projectDir: b.proj, cwd: cwdDir, configDir: b.config, gitCeiling: b.base }), { dir: good });
+});
+
+test('6.6 / SR-C6 (L-3, child process, Windows): the long-path forms of a real local folder (\\\\?\\ and //?/) are refused, default used, exit 0 (local only, no network)', { skip: !IS_WIN && 'Windows path forms only: on macOS and Linux a leading // is an ordinary path (tested as strings above)' }, () => {
+  const b = H.makeBase('hdir-long');
+  const kit = H.copyKit(b);
+  const good = H.mk(b.base, 'notes');
+  let n = 150;
+  for (const [label, v, refused] of [['plain (control)', good, false], ['long-path form', BS + BS + '?' + BS + good, true], ['forward-slash device form', '//?/' + good, true]]) {
+    writeConfig(kit, { handoff_dir: v });
+    const t = H.writeTranscript(b, 150000, { name: 'long-' + n });
+    const r = R.runMeter(b, { scriptFile: kit.scriptFile, input: JSON.stringify(H.promptInput(b, t, H.sessionId(n++))), env: H.copyEnv(b) });
+    assert.equal(r.status, 0, label);
+    assert.equal(r.stderr, '', label);
+    const out = JSON.parse(r.text);
+    noBlocking(out);
+    assert.equal((out.systemMessage || '').includes(M.LINES.HANDOFF_DIR_REFUSED), refused, label);
+  }
+});
+
 test('6.6 / SR-C6 (L-3): the hook still fails safe on a refused handoff_dir: exit 0, no blocking field, the refusal line once (real process)', () => {
   const b = H.makeBase('hdir-proc');
   const kit = H.copyKit(b);
@@ -623,6 +678,9 @@ test('6.6 a / 6.11 f (MUST): a hand-off folder whose note path holds a character
     ['format (U+FFF9)', 'a￹b'],
     ['tags (U+E0041)', 'a\u{e0041}b'],
     ['tags (U+E007F)', 'a\u{e007f}b'],
+    ['ignorable (a run of variation selectors)', 'a\u{e0100}\u{e0101}b'],
+    ['ignorable (two emoji selectors)', 'a️️b'],
+    ['ignorable (Hangul filler)', 'aㅤb'],
   ];
   if (!IS_WIN) cases.push(['controls (C0, line feed)', 'a\nb']);
   const covered = new Set();
@@ -684,6 +742,12 @@ test('6.6 a / 6.11 f (MUST): a hand-off folder whose note path holds a character
   assert.equal(noteFiles(good).length, 1);
   assert.ok(ok.hookSpecificOutput.additionalContext.includes(path.join(good, noteFiles(good)[0])));
   assert.ok(!(ok.systemMessage || '').includes(M.LINES.NOTE_UNPRINTABLE));
+  // So does a folder whose name holds one emoji selector after a heart (the one exception).
+  const heart = H.mk(b.base, 'team ❤️ notes');
+  writeConfig(kit, { handoff_dir: heart });
+  const ok2 = promptAt(b, kit, env, 150000, H.sessionId(93));
+  assert.equal(noteFiles(heart).length, 1, 'heart + U+FE0F: the note is made');
+  assert.ok(ok2.hookSpecificOutput.additionalContext.includes(path.join(heart, noteFiles(heart)[0])));
 });
 
 // ---------------------------------------------------------------------------

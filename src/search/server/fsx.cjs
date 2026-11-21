@@ -44,7 +44,8 @@ function isWindows(platform) {
 // controls; line and paragraph separators; bidi controls; zero-width and
 // invisible characters; every other Cc, Cf, Zl and Zp character (the class the
 // walker and the envelope use for file names); the whole tag block
-// U+E0000-U+E007F.
+// U+E0000-U+E007F; every default-ignorable code point, except a lone U+FE0E or
+// U+FE0F after a visible character (LONE_PRESENTATION_SELECTOR, equal to the meter's).
 
 const PATH_MAX_CHARS = 1024;
 const UNPRINTABLE_CLASSES = Object.freeze({
@@ -54,14 +55,31 @@ const UNPRINTABLE_CLASSES = Object.freeze({
   zero_width: '\\u200b-\\u200d\\u2060\\ufeff',
   format: '\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}',
   tags: '\\u{e0000}-\\u{e007f}',
+  ignorable: '\\p{Default_Ignorable_Code_Point}',
 });
-const UNPRINTABLE_RE = new RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
+const LONE_PRESENTATION_SELECTOR = '(?<=[^\\s/\\\\\\ufe00-\\ufe0f\\u{e0100}-\\u{e01ef}])[\\ufe0e\\ufe0f]';
 
-/** True when p may be shown: no character of UNPRINTABLE_CLASSES, at most 1,024 characters. */
-function printablePath(p) {
-  if (typeof p !== 'string' || p === '' || p.length > PATH_MAX_CHARS) return false;
-  return !UNPRINTABLE_RE.test(p);
+/**
+ * Builds the test: true when p may be shown (no character of UNPRINTABLE_CLASSES once a lone
+ * presentation selector is set aside, at most 1,024 characters). Fails closed: if the table
+ * cannot be built (a Node without the Unicode property data), no path may be shown.
+ * _RegExp: test-only seam.
+ */
+function makePrintablePath(_RegExp = RegExp) {
+  let table;
+  let lone;
+  try {
+    table = new _RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
+    lone = new _RegExp(LONE_PRESENTATION_SELECTOR, 'gu');
+  } catch (_) {
+    return function printablePath() { return false; };
+  }
+  return function printablePath(p) {
+    if (typeof p !== 'string' || p === '' || p.length > PATH_MAX_CHARS) return false;
+    return !table.test(p.replace(lone, ''));
+  };
 }
+const printablePath = makePrintablePath();
 
 // ---------------------------------------------------------------------------
 // Path compare (SR-5). The only inside check of the server: every other module
@@ -450,6 +468,8 @@ module.exports = {
   TEMP_NAME_RE,
   PATH_MAX_CHARS,
   UNPRINTABLE_CLASSES,
+  LONE_PRESENTATION_SELECTOR,
+  makePrintablePath,
   printablePath,
   isInside,
   samePath,

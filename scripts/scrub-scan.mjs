@@ -188,6 +188,9 @@ function loadRules(file) {
   c.ownerPlaceholders = new Set(hh.owner_placeholders.map((s) => s.toLowerCase()));
   c.hostReserved = new Set(hh.host_reserved_paths.map((s) => s.toLowerCase()));
   c.slugAllow = new Set((hh.install_slug_allow || []).map((s) => s.toLowerCase()));
+  // The hosts on which an allowed slug may stand in a web address (both layers); the host part
+  // as the address pattern's first group takes it, separator included.
+  c.slugHosts = new Set((hh.install_slug_hosts || []).map((s) => s.toLowerCase()));
 
   c.iso = re(r.iso_date);
   c.isoExclude = r.iso_date.scope_exclude || [];
@@ -348,7 +351,7 @@ function scanPublic(c, ctx, rel, text, opts = {}) {
       const repo = (m[3] || '').replace(/\.git$/i, '');
       if (/^[<{$]/.test(owner) || c.ownerPlaceholders.has(owner.toLowerCase())) continue;
       if (host.startsWith('github.com') && c.hostReserved.has(owner.toLowerCase())) continue;
-      if (repo && c.slugAllow.has(`${owner}/${repo}`.toLowerCase())) continue;
+      if (repo && c.slugHosts.has(host) && c.slugAllow.has(`${owner}/${repo}`.toLowerCase())) continue;
       add(ln, 'host-handle');
     }
     for (const m of line.matchAll(c.hostInstall)) {
@@ -572,11 +575,10 @@ function privateSlugs(c, allowSlugs) {
   return out;
 }
 
-const SLUG_CHAR = /[A-Za-z0-9_-]/;
-
 // Spans [start, end) on one line where an allowed slug may stand (13.1, private layer):
-// the whole `<owner>/<repo>` of an install line or a host web address (the public layer's own
-// patterns); in `.github/CODEOWNERS`, an `@<owner>` entry on an owner line (not a comment, not
+// the whole `<owner>/<repo>` of an install line or of a web address on one of the
+// `install_slug_hosts` (the public layer's own patterns, whose repo part already takes every
+// slug character, so nothing can follow the slug inside a word); in `.github/CODEOWNERS`, an `@<owner>` entry on an owner line (not a comment, not
 // the path pattern); in `scripts/scrub-rules.json`, the quoted slug on the `install_slug_allow`
 // line. Anywhere else a term hit still counts.
 function allowedSpans(c, rel, line, slugs) {
@@ -589,13 +591,11 @@ function allowedSpans(c, rel, line, slugs) {
     if (!owner || !repoRaw) return;
     const repo = repoRaw.replace(/\.git$/i, '');
     if (!bySlug.has(`${owner}/${repo}`.toLowerCase())) return;
-    const start = m.indices[gOwner][0];
-    const end = m.indices[gRepo][1];
-    const after = line[end];
-    if (after !== undefined && SLUG_CHAR.test(after)) return;
-    spans.push([start, end]);
+    spans.push([m.indices[gOwner][0], m.indices[gRepo][1]]);
   };
-  for (const m of line.matchAll(c.hostUrlD)) fromMatch(m, 2, 3);
+  for (const m of line.matchAll(c.hostUrlD)) {
+    if (c.slugHosts.has(m[1].toLowerCase())) fromMatch(m, 2, 3);
+  }
   for (const m of line.matchAll(c.hostInstallD)) fromMatch(m, 1, 2);
   if (rel === '.github/CODEOWNERS' && !line.trim().startsWith('#')) {
     const owners = new Set(slugs.map((s) => s.owner));

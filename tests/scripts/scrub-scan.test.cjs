@@ -530,18 +530,22 @@ test('13.1 private layer: the bare account name, the account in another slug or 
     'e.md': `see ${SLUG} for more\n`,
     'f.md': `Zq ${SURNAME[0].toUpperCase()}${SURNAME.slice(1)} wrote this\n`,
     'g.md': `${installLine(SLUG)} by ${SLUG_OWNER}\n`,
-    'scripts/other.json': `{ "install_slug_allow": ["${SLUG}"] }\n`,
-    '.github/CODEOWNERS': `# owner: @${SLUG_OWNER}\n@${SLUG_OWNER}/x/** @${SLUG_OWNER}\n`,
+    // The rules line in the very shape the allowance reads, but in another file (end gate round 1, F-2).
+    'scripts/other.json': `{\n  "install_slug_allow": ["${SLUG}"]\n}\n`,
+    // A comment; a path pattern; an owner entry standing as the path pattern (first token, F-3).
+    '.github/CODEOWNERS': `# owner: @${SLUG_OWNER}\n@${SLUG_OWNER}/x/** @${SLUG_OWNER}\n@${SLUG_OWNER} @${SLUG_OWNER}\n`,
   };
   const { repo, deny } = slugRepo(cases);
   const res = scan(repo, ['--private'], { SCRUB_DENYLIST: deny });
   assert.strictEqual(res.code, 1);
-  for (const f of ['a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'g.md', 'scripts/other.json']) {
+  for (const f of ['a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'g.md']) {
     assert.ok(res.lines.includes(`${f}:1 private-term-1`), `${f}\n${res.out}`);
   }
   assert.ok(res.lines.includes('f.md:1 private-term-2'), res.out);
+  assert.ok(res.lines.includes('scripts/other.json:2 private-term-1'), 'the rules line in another file: ' + res.out);
   assert.ok(res.lines.includes('.github/CODEOWNERS:1 private-term-1'), 'a comment line: ' + res.out);
   assert.ok(res.lines.includes('.github/CODEOWNERS:2 private-term-1'), 'the path pattern: ' + res.out);
+  assert.ok(res.lines.includes('.github/CODEOWNERS:3 private-term-1'), 'an owner entry as the path pattern: ' + res.out);
   assert.ok(!res.out.toLowerCase().includes(SURNAME), 'output must never contain a private term');
 });
 
@@ -561,6 +565,38 @@ test('13.1 private layer: a slug on only one of the two lists is not allowed (ne
   const c = scan(odd.repo, ['--private'], { SCRUB_DENYLIST: odd.deny });
   assert.strictEqual(c.code, 1);
   assert.ok(c.lines.includes('README.md:1 private-term-1'), c.out);
+  // An allow line is not a term (end gate round 1, F-4): a deny-list of allow lines only has no terms.
+  const onlyAllow = slugRepo(SLUG_OK);
+  fs.writeFileSync(onlyAllow.deny, `# allow entries only\nallow-slug: ${SLUG}\n`);
+  const d = scan(onlyAllow.repo, ['--private'], { SCRUB_DENYLIST: onlyAllow.deny });
+  assert.strictEqual(d.code, 1);
+  assert.match(d.out, /scrub private: FAIL \(deny-list has no terms\)/);
+});
+
+test('13.1 (end gate round 1, review F-4): the allowed slug passes only on github.com; the same slug under any other host fails both layers', () => {
+  const others = [
+    `https://x.com/${SLUG}`,
+    `https://twitter.com/${SLUG}`,
+    `https://www.linkedin.com/in/${SLUG}`,
+    `https://www.npmjs.com/~${SLUG}`,
+    `https://gitlab.com/${SLUG}`,
+    `https://bitbucket.org/${SLUG}`,
+    `https://codeberg.org/${SLUG}`,
+    `https://gist.github.com/${SLUG}`,
+    `https://raw.githubusercontent.com/${SLUG}/main/x`,
+  ];
+  const files = Object.fromEntries(others.map((u, i) => [`h${i}.md`, `follow ${u}\n`]));
+  files['ok.md'] = `${codeHostUrl(SLUG_OWNER, 'zqrepo')}\nhttps://www.${['git', 'hub'].join('')}.com/${SLUG}\n`;
+  const { repo, deny } = slugRepo(files);
+  const res = scan(repo, ['--private'], { SCRUB_DENYLIST: deny });
+  assert.strictEqual(res.code, 1);
+  others.forEach((u, i) => {
+    const host = u.split('/')[2];
+    assert.ok(hasHit(res, `h${i}.md`, 'host-handle'), `public layer, ${host}\n${res.out}`);
+    assert.ok(res.lines.includes(`h${i}.md:1 private-term-1`), `private layer, ${host}\n${res.out}`);
+  });
+  assert.deepStrictEqual(hitsFor(res, 'ok.md'), [], 'github.com, with and without www, passes');
+  assert.deepStrictEqual(REAL_RULES.host_handle.install_slug_hosts, ['github.com/', 'github.com:']);
 });
 
 test('13.1 private layer through scanContent (the egress scan path): the same allowed places and the same failures', async () => {

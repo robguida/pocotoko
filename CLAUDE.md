@@ -19,7 +19,7 @@ A Claude Code plugin with a copy-by-hand install path. This file is public. Keep
 ## Hard lines
 - No plugin, marketplace, skill, MCP server or tool name contains "claude" or "anthropic".
 - No savings claims anywhere: no numbers, percentages or money tied to tokens, cost or speed, and no "uses fewer tokens" wording. Explaining a mechanism is fine.
-- The copyright holder's name appears only in `LICENSE`. The GitHub account name appears only inside the install lines, the repository addresses and the owner entries of `.github/CODEOWNERS`.
+- The copyright holder's name appears only in `LICENSE`. The GitHub account name appears only inside the install lines, the repository addresses (including the `repository` and `homepage` fields of the plugin manifests), the owner entries of `.github/CODEOWNERS` and the scrub scan's install-slug allow list.
 
 ## Before every commit
 - Run the scrub scan, both layers: `node scripts/scrub-scan.mjs` and `node scripts/scrub-scan.mjs --private`. Both must pass.

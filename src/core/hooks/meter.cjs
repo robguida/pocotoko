@@ -79,8 +79,12 @@ const LINES = Object.freeze({
 // characters (U+200B-U+200D, U+2060, U+FEFF); every other control, format, line-separator
 // and paragraph-separator character (Unicode classes Cc, Cf, Zl, Zp: the search server's
 // own file-name class, so both plugins agree; it holds, for example, the soft hyphen
-// U+00AD, U+180E, U+2061-U+2064, U+206A-U+206F and U+FFF9-U+FFFB); and the whole tag block
-// U+E0000-U+E007F, assigned or not (text an AI model reads but a screen does not show).
+// U+00AD, U+180E, U+2061-U+2064, U+206A-U+206F and U+FFF9-U+FFFB); the whole tag block
+// U+E0000-U+E007F, assigned or not (text an AI model reads but a screen does not show); and
+// every default-ignorable code point (variation selectors U+FE00-U+FE0F and
+// U+E0100-U+E01EF, the Hangul fillers, U+034F, U+17B4-U+17B5, U+180B-U+180F, and the
+// unassigned ones such as U+2065, U+FFF0-U+FFF8 and U+E0080-U+E0FFF), with one exception:
+// LONE_PRESENTATION_SELECTOR below.
 const UNPRINTABLE_CLASSES = Object.freeze({
   controls: '\\u0000-\\u001f\\u007f-\\u009f',
   separators: '\\u2028\\u2029',
@@ -88,8 +92,14 @@ const UNPRINTABLE_CLASSES = Object.freeze({
   zero_width: '\\u200b-\\u200d\\u2060\\ufeff',
   format: '\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}',
   tags: '\\u{e0000}-\\u{e007f}',
+  ignorable: '\\p{Default_Ignorable_Code_Point}',
 });
-const UNPRINTABLE_RE = new RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
+// 6.11 f: the one character of the set that may stand in a printed path: a single U+FE0E or
+// U+FE0F (text or emoji presentation, as in heart + U+FE0F) right after a character that is
+// not a space, a slash or a variation selector. Two or more variation selectors in a row are
+// never printed (hidden-byte encodings use runs): each one after the first follows a variation
+// selector, and every other variation selector is in the table.
+const LONE_PRESENTATION_SELECTOR = '(?<=[^\\s/\\\\\\ufe00-\\ufe0f\\u{e0100}-\\u{e01ef}])[\\ufe0e\\ufe0f]';
 
 const SESSION_FILE_RE = /^(?:[a-z0-9_-]{1,64}|h-[0-9a-f]{32})\.json$/;
 // <name>.<pid>.<16 hex>.tmp; group 1 is <name>. Temp cleanup removes a match only when
@@ -118,13 +128,27 @@ function nonEmpty(v) {
 }
 
 /**
- * 6.6 a, 6.11 f: a path may be printed only when it holds no character of
- * UNPRINTABLE_CLASSES and is at most 1,024 characters.
+ * 6.6 a, 6.11 f: builds the printable-path test. A path may be printed only when, after a
+ * LONE_PRESENTATION_SELECTOR is set aside, it holds no character of UNPRINTABLE_CLASSES, and
+ * it is at most 1,024 characters. Fails closed: when the table cannot be built (a Node built
+ * without the Unicode property data), every path counts as unprintable, so the hooks still
+ * exit 0 and simply name no path. _RegExp: test-only seam.
  */
-function printablePath(p) {
-  if (typeof p !== 'string' || p === '' || p.length > LIMITS.PATH_MAX_CHARS) return false;
-  return !UNPRINTABLE_RE.test(p);
+function makePrintablePath(_RegExp = RegExp) {
+  let table;
+  let lone;
+  try {
+    table = new _RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
+    lone = new _RegExp(LONE_PRESENTATION_SELECTOR, 'gu');
+  } catch (_) {
+    return function printablePath() { return false; };
+  }
+  return function printablePath(p) {
+    if (typeof p !== 'string' || p === '' || p.length > LIMITS.PATH_MAX_CHARS) return false;
+    return !table.test(p.replace(lone, ''));
+  };
 }
+const printablePath = makePrintablePath();
 
 function isWindows(platform) {
   return platform === 'win32';
@@ -227,6 +251,23 @@ function inGitWorkTree(p, ceiling = null, _lstat = fs.lstatSync) {
 
 function homeDir() {
   return realLoose(os.homedir());
+}
+
+/**
+ * The account's own home folder, from the account database (`os.userInfo`), never from HOME
+ * or USERPROFILE, which a project's settings could set (6.11 h). os.homedir() only when the
+ * account lookup fails or gives no folder. _userInfo, _homedir: test-only seams.
+ */
+function accountHomeDir(_userInfo = os.userInfo, _homedir = os.homedir) {
+  let h = null;
+  try {
+    const u = _userInfo();
+    if (u && typeof u.homedir === 'string' && u.homedir !== '') h = u.homedir;
+  } catch (_) {
+    h = null;
+  }
+  if (!h) h = _homedir();
+  return realLoose(h);
 }
 
 /** The config folder: CLAUDE_CONFIG_DIR when set to an absolute path, else <home>/.claude. */
@@ -937,13 +978,24 @@ function isWindowsNetworkOrDevicePath(p, platform = process.platform) {
  * path once. Refused when it is a Windows network or device path (tested on the string,
  * before any file call, so no network connection is ever made), inside the config folder
  * (configDir, a real path), inside the current project (CLAUDE_PROJECT_DIR or the hook
- * input's cwd) or inside any git work tree. Returns { dir } | { refused: true }.
+ * input's cwd) or inside any git work tree. The config-folder and project checks run twice:
+ * first on the value as written, before its links are resolved (so a link inside the
+ * project is refused without being followed), then on its real path. The git check needs
+ * the file system, so it runs on the real path only. Returns { dir } | { refused: true }.
  * _realpath: test-only seam.
  */
 function resolveHandoffDir(value, { projectDir, cwd, configDir = null, platform = process.platform, gitCeiling = null, _realpath = fs.realpathSync.native }) {
   const s = typeof value === 'string' ? value.trim() : '';
   if (!isAbsoluteFor(s, platform)) return { refused: true };
   if (isWindowsNetworkOrDevicePath(s, platform)) return { refused: true };
+  const fenced = [];
+  if (nonEmpty(configDir)) fenced.push(configDir);
+  for (const p of [projectDir, cwd]) {
+    if (!nonEmpty(p) || !isAbsoluteFor(p, platform)) continue;
+    fenced.push(path.resolve(p));
+    try { fenced.push(fs.realpathSync.native(p)); } catch (_) { /* the written form is checked */ }
+  }
+  if (fenced.some((f) => isInside(s, f, platform))) return { refused: true };
   let real;
   try {
     real = _realpath(s);
@@ -951,13 +1003,7 @@ function resolveHandoffDir(value, { projectDir, cwd, configDir = null, platform 
   } catch (_) {
     return { refused: true };
   }
-  if (nonEmpty(configDir) && isInside(real, configDir, platform)) return { refused: true };
-  for (const p of [projectDir, cwd]) {
-    if (!nonEmpty(p) || !isAbsoluteFor(p, platform)) continue;
-    let pr;
-    try { pr = fs.realpathSync.native(p); } catch (_) { pr = path.resolve(p); }
-    if (isInside(real, pr, platform)) return { refused: true };
-  }
+  if (fenced.some((f) => isInside(real, f, platform))) return { refused: true };
   if (inGitWorkTree(real, gitCeiling)) return { refused: true };
   return { dir: real };
 }
@@ -1360,6 +1406,8 @@ module.exports = {
   LINES,
   ENV_PREFIX,
   UNPRINTABLE_CLASSES,
+  LONE_PRESENTATION_SELECTOR,
+  makePrintablePath,
   printablePath,
   SESSION_FILE_RE,
   TEMP_NAME_RE,
@@ -1371,6 +1419,7 @@ module.exports = {
   realLoose,
   inGitWorkTree,
   homeDir,
+  accountHomeDir,
   configDirOf,
   pluginsDirOf,
   installMode,

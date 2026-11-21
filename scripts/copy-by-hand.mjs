@@ -153,11 +153,17 @@ function fireThroughSettings(run, env, values, shells, shellName, log) {
     let ok = r.status === 0 && j !== undefined;
     let what = 'exit ' + r.status;
     if (expect === 'session-start') {
-      // The sandbox sits inside this repo's git work tree, so the kit writes nothing (6.7).
+      // The sandbox sits inside this repo's git work tree, so the kit writes nothing (6.7), and
+      // the copied skill sits in that work tree below the account's own home, so it is not
+      // read (6.11 h): the git-repo routing line comes instead of the block. The launcher run
+      // below (a git ceiling at the run folder) is where the block is seen.
       const routing = fs.readFileSync(path.join(run.L.config, 'skills', 'model-routing', 'SKILL.md'), 'utf8');
       const block = routing.slice(routing.indexOf('-->', routing.indexOf('routing-block:start')) + 3, routing.indexOf('<!-- routing-block:end')).trim();
-      ok = ok && j && /inside a git repo/.test(j.systemMessage || '') && String((j.hookSpecificOutput || {}).additionalContext || '').includes(block);
-      what += j ? ', write-nothing line (git work tree) + routing block from the copied skill' : ', no output';
+      const msg = String((j && j.systemMessage) || '');
+      ok = ok && j && /your Claude config folder is inside a git repo/.test(msg)
+        && msg.includes('the model-routing skill file is inside a git repo, so it was not read.')
+        && !String((j.hookSpecificOutput || {}).additionalContext || '').includes(block);
+      what += j ? ', write-nothing line (git work tree) + the git-repo routing line, no block' : ', no output';
     } else {
       ok = ok && j === null;
       what += ', no output (git work tree: no tier warnings)';

@@ -762,20 +762,29 @@ test('9.8 / SR-12: the search server\'s copy of the 6.11 f table and cap (server
   const samples = ['/x/a\u202eb', '/x/a\u0085b', '/x/a\u2028b', '/x/a\u200bb', '/x/a\ufeffb', '/x/a\u0000b', '/x/ab', '/x/\u00e9\u4e2d', 'x'.repeat(1024), 'x'.repeat(1025), '',
     '/x/a\u00adb', '/x/a\u180eb', '/x/a\u2061b', '/x/a\u206fb', '/x/a\ufffbb', '/x/a\u{e0000}b', '/x/a\u{e0041}b', '/x/a\u{e007f}b', '/x/a\u{e0080}b', '/x/a\u2065b'];
   for (const p of samples) assert.equal(FSX.printablePath(p), M.printablePath(p), JSON.stringify(p.slice(0, 8)));
-  // L-1: every character the search server's file-name class refuses (walker.cjs, envelope.cjs)
-  // is never printed in a path by either plugin, and so is the whole tag block.
-  const serverClass = /^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]$/u;
+  // L-1 and end gate round 1: every character the search server's file-name class refuses
+  // (walker.cjs, envelope.cjs), the whole tag block and every default-ignorable code point is
+  // never printed in a path by either plugin, with the one exception: a lone U+FE0E or U+FE0F
+  // after a visible character. Every other code point swept gives the same answer in both.
+  assert.equal(FSX.LONE_PRESENTATION_SELECTOR, M.LONE_PRESENTATION_SELECTOR);
+  const serverClass = /^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]$/u;
   let refused = 0;
-  for (let cp = 0; cp <= 0xe01ff; cp++) {
+  for (let cp = 0; cp <= 0xe0fff; cp++) {
     if (cp >= 0xd800 && cp <= 0xdfff) continue;
-    if (cp > 0xffff && cp < 0xe0000 && cp !== 0x110bd && cp !== 0x1d173) continue;
+    if (cp > 0xffff && cp < 0xe0000 && ![0x110bd, 0x1bca0, 0x1bca3, 0x1d173, 0x1d17a, 0x1f600, 0x1f1e6].includes(cp)) continue;
     const ch = String.fromCodePoint(cp);
-    const must = serverClass.test(ch) || (cp >= 0xe0000 && cp <= 0xe007f);
+    const p = '/x/a' + ch + 'b';
+    assert.equal(FSX.printablePath(p), M.printablePath(p), 'same answer U+' + cp.toString(16));
+    const must = (serverClass.test(ch) || (cp >= 0xe0000 && cp <= 0xe007f)) && cp !== 0xfe0e && cp !== 0xfe0f;
     if (!must) continue;
     refused++;
-    assert.equal(M.printablePath('/x/a' + ch + 'b'), false, 'meter U+' + cp.toString(16));
-    assert.equal(FSX.printablePath('/x/a' + ch + 'b'), false, 'server U+' + cp.toString(16));
+    assert.equal(M.printablePath(p), false, 'meter U+' + cp.toString(16));
   }
-  assert.ok(refused > 200, 'the sweep found the class');
+  assert.ok(refused > 4000, 'the sweep found the classes');
+  for (const ch of ['︎', '️']) {
+    assert.equal(M.printablePath('/x/a' + ch + 'b'), true, 'a lone selector after a letter');
+    assert.equal(M.printablePath('/x/a' + ch + ch + 'b'), false, 'two in a row');
+    assert.equal(FSX.printablePath('/x/a' + ch + ch + 'b'), false, 'two in a row (server)');
+  }
   assert.equal(SRV.LINES.FOLDER_UNPRINTABLE, '(not shown: the folder path holds a character that cannot be shown safely, or is over 1,024 characters)');
 });

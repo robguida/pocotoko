@@ -144,12 +144,14 @@ function insideProject(file, { projectDir, cwd, home, platform = process.platfor
  * 6.11 h: true when the real path of file sits inside a git work tree (a `.git` file or
  * folder in its folder or any folder above it, as in 6.7), so a repo that points the config
  * folder into a subfolder of itself is caught even when the session starts in another
- * subfolder. The same home-folder skip as insideProject: a `.git` in the home folder or
- * above it (a home folder kept as a git repo) is not counted. Fails closed like the 6.7
- * check: any `.git` error other than not-found counts as found. gitCeiling: test-only seam;
- * the walk stops after that folder. _lstat: test-only seam.
+ * subfolder. A home-folder skip like insideProject's: a `.git` in the home folder or above
+ * it (a home folder kept as a git repo) is not counted. The caller passes the ACCOUNT home
+ * (M.accountHomeDir), not HOME or USERPROFILE, which the same project settings could point
+ * at the repo. No home given: nothing is skipped. Fails closed like the 6.7 check: any
+ * `.git` error other than not-found counts as found. gitCeiling: test-only seam; the walk
+ * stops after that folder. _lstat: test-only seam.
  */
-function insideGitRepo(file, { home, platform = process.platform, gitCeiling = null, _lstat = fs.lstatSync }) {
+function insideGitRepo(file, { home = null, platform = process.platform, gitCeiling = null, _lstat = fs.lstatSync }) {
   let cur = M.realLoose(file);
   for (;;) {
     if (home && M.isInside(home, cur, platform)) return false;
@@ -166,21 +168,27 @@ function insideGitRepo(file, { home, platform = process.platform, gitCeiling = n
   }
 }
 
-/** 6.11 h: why a file taken from the config folder is not read: 'project', 'git' or null. */
+/**
+ * 6.11 h: why the skill file taken from the config folder is not read: 'project', 'git' or
+ * null. where: { projectDir, cwd, home (the project check's skip), accountHome (the git
+ * check's skip), gitCeiling, platform }.
+ */
 function configFileRefusal(file, where) {
   if (insideProject(file, where)) return 'project';
-  if (insideGitRepo(file, where)) return 'git';
+  if (insideGitRepo(file, { platform: where.platform, gitCeiling: where.gitCeiling, home: where.accountHome || null, _lstat: where._lstat })) return 'git';
   return null;
 }
 
 /**
  * True when the user-level CLAUDE.md in the config folder holds the routing block's start
- * marker (5.1). A CLAUDE.md inside the current project or a git work tree counts as not
- * holding it (6.11 h).
+ * marker (5.1). A CLAUDE.md inside the current project counts as not holding it (6.11 h).
+ * One inside a git work tree does count: its marker can only turn the kit's own injection
+ * off, Claude Code loads that file anyway, and ignoring it would send the block twice to
+ * everyone who keeps the config folder as a git repo.
  */
 function userRulesHoldBlock(env, home, platform = process.platform, where = {}) {
   const file = path.join(M.configDirOf(env, home, platform), 'CLAUDE.md');
-  if (configFileRefusal(file, { home, ...where, platform })) return false;
+  if (insideProject(file, { home, ...where, platform })) return false;
   const r = readText(file, LIMITS.USER_RULES_MAX_BYTES, { truncate: true });
   return typeof r.text === 'string' && r.text.includes(MARK_START);
 }
@@ -214,8 +222,8 @@ function handoffFolder({ mode, opts, env, cwd, home, platform, gitCeiling }) {
 
 /**
  * The hook, given the parsed hook input. Returns the hook output object, or null for no
- * output. ctx: { env, scriptFile, home, platform, execPath, gitCeiling, meterFile }
- * (execPath, gitCeiling, meterFile: test seams; meterFile defaults to meter.cjs beside
+ * output. ctx: { env, scriptFile, home, platform, execPath, gitCeiling, meterFile, accountHome }
+ * (execPath, gitCeiling, meterFile, accountHome: test seams; meterFile defaults to meter.cjs beside
  * scriptFile, the file --sync copies).
  */
 function handleSessionStart(input, ctx) {
@@ -257,7 +265,9 @@ function handleSessionStart(input, ctx) {
   }
 
   let rules = '';
-  const where = { projectDir: env.CLAUDE_PROJECT_DIR, cwd, home, gitCeiling };
+  // 6.11 h: the git check's home skip uses the account's own home, never HOME or USERPROFILE.
+  const accountHome = ctx.accountHome || M.accountHomeDir();
+  const where = { projectDir: env.CLAUDE_PROJECT_DIR, cwd, home, accountHome, gitCeiling };
   if (opts.routing_rules_at_start && !userRulesHoldBlock(env, home, platform, where)) {
     const skillFile = routingSkillFile(mode, env, home, platform);
     // 6.11 h (MUST): a skill copy taken from the config folder must not sit in the project,
