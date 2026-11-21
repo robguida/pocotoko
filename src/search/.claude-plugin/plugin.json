@@ -6,6 +6,8 @@
     "name": "Project maintainers"
   },
   "license": "MIT",
+  "repository": "https://github.com/robguida/pocotoko",
+  "homepage": "https://github.com/robguida/pocotoko",
   "engines": {
     "claude-code": ">=2.1.329"
   },

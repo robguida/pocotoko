@@ -1,7 +1,6 @@
-# Replace <owner> with the owner's handle once the host repository exists.
 # Review is required from the owner for the paths that run code or guard the repo.
-src/**/hooks/** @<owner>
-src/search/** @<owner>
-.github/** @<owner>
-scripts/** @<owner>
-package.json @<owner>
+src/**/hooks/** @robguida
+src/search/** @robguida
+.github/** @robguida
+scripts/** @robguida
+package.json @robguida

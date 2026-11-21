@@ -287,8 +287,12 @@ test('copyright line: once in LICENSE passes, twice fails, THIRD-PARTY-NOTICES p
 
 // ---------- allow-lists ----------
 
-test('allow-lists: an allow-listed install slug and address pass; the shipped lists start empty', () => {
-  assert.deepStrictEqual(REAL_RULES.host_handle.install_slug_allow, []);
+test('allow-lists: an allow-listed install slug and address pass; the shipped install list holds the one host slug (this repo, its own name), the email list stays empty', () => {
+  const slugs = REAL_RULES.host_handle.install_slug_allow;
+  assert.strictEqual(slugs.length, 1);
+  const [owner, repo] = slugs[0].split('/');
+  assert.ok(/^[a-z0-9-]+$/.test(owner) && !REAL_RULES.host_handle.owner_placeholders.includes(owner), 'a real owner, not a placeholder');
+  assert.strictEqual(repo, JSON.parse(fs.readFileSync(path.join(REPO_TOP, 'src', 'core', '.claude-plugin', 'plugin.json'), 'utf8')).name, 'the repo is named after the product');
   assert.deepStrictEqual(REAL_RULES.email.allow, []);
   const files = {
     'README.md': [codeHostUrl('zqtester', 'zqrepo'), installLine('zqtester/zqrepo'), fakeEmail()].join('\n'),
@@ -472,6 +476,111 @@ test('a deny-list term passes only inside the one LICENSE copyright line, and ou
   assert.match(fail.out, /\[path withheld: file \d+ of \d+\]:0 private-term-1-in-path/);
   assert.ok(!fail.out.toLowerCase().includes(term), 'output must never contain the private term');
   assert.ok(!pass.out.toLowerCase().includes(term));
+});
+
+// ---------- the install slug in the private layer (13.1, settled at publish) ----------
+
+// A synthetic owner account whose name holds the synthetic holder's surname inside one word,
+// as the real one does. Both are deny-list terms; the slug is on both allow lists.
+const SLUG_OWNER = ['zq', 'zorblax'].join('');
+const SURNAME = ['zor', 'blax'].join('');
+const SLUG = `${SLUG_OWNER}/zqrepo`;
+
+function slugRules(list = [SLUG]) {
+  const rules = baseRules();
+  rules.host_handle.install_slug_allow = list;
+  return rules;
+}
+
+function slugRepo(files, { rules = slugRules(), allowLines = [`allow-slug: ${SLUG}`] } = {}) {
+  const repo = makeRepo(files, { rules });
+  const deny = path.join(repo.dir, 'sandbox', 'deny.txt');
+  fs.writeFileSync(deny, ['# terms', SLUG_OWNER, SURNAME, ...allowLines].join('\n') + '\n');
+  return { repo, deny };
+}
+
+const SLUG_OK = {
+  'README.md': [
+    `${installLine(SLUG)}#v1.0.0`,
+    `claude plugin install zqkit --marketplace ${SLUG}`,
+    codeHostUrl(SLUG_OWNER, 'zqrepo'),
+    `${codeHostUrl(SLUG_OWNER, 'zqrepo')}.git`,
+  ].join('\n') + '\n',
+  'p/.claude-plugin/plugin.json': JSON.stringify({ name: 'zqkit', author: { name: LABEL }, repository: codeHostUrl(SLUG_OWNER, 'zqrepo'), homepage: codeHostUrl(SLUG_OWNER, 'zqrepo') }, null, 2) + '\n',
+  '.github/CODEOWNERS': `src/** @${SLUG_OWNER}\nscripts/** @${SLUG_OWNER} # the one owner\n`,
+  'scripts/scrub-rules.json': `{\n  "host_handle": {\n    "install_slug_allow": ["${SLUG}"]\n  }\n}\n`,
+  'src/core/.claude-plugin/plugin.json': coreManifest(),
+};
+
+test('13.1 private layer: the install slug on both allow lists passes in install lines, host web addresses (with .git), CODEOWNERS owner entries and the rules file\'s allow line; output never holds a term', () => {
+  const { repo, deny } = slugRepo(SLUG_OK);
+  const res = scan(repo, ['--private'], { SCRUB_DENYLIST: deny });
+  assert.strictEqual(res.code, 0, res.out);
+  assert.match(res.out, /scrub public: PASS/);
+  assert.match(res.out, /scrub private: PASS/);
+  assert.ok(!res.out.toLowerCase().includes(SURNAME));
+});
+
+test('13.1 private layer: the bare account name, the account in another slug or a comment, and the holder\'s surname anywhere else still fail', () => {
+  const cases = {
+    'a.md': `maintained by ${SLUG_OWNER}\n`,
+    'b.md': `ping @${SLUG_OWNER} for review\n`,
+    'c.md': `${codeHostUrl(SLUG_OWNER, 'other')}\n`,
+    'd.md': `${installLine(`${SLUG_OWNER}/other`)}\n`,
+    'e.md': `see ${SLUG} for more\n`,
+    'f.md': `Zq ${SURNAME[0].toUpperCase()}${SURNAME.slice(1)} wrote this\n`,
+    'g.md': `${installLine(SLUG)} by ${SLUG_OWNER}\n`,
+    'scripts/other.json': `{ "install_slug_allow": ["${SLUG}"] }\n`,
+    '.github/CODEOWNERS': `# owner: @${SLUG_OWNER}\n@${SLUG_OWNER}/x/** @${SLUG_OWNER}\n`,
+  };
+  const { repo, deny } = slugRepo(cases);
+  const res = scan(repo, ['--private'], { SCRUB_DENYLIST: deny });
+  assert.strictEqual(res.code, 1);
+  for (const f of ['a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'g.md', 'scripts/other.json']) {
+    assert.ok(res.lines.includes(`${f}:1 private-term-1`), `${f}\n${res.out}`);
+  }
+  assert.ok(res.lines.includes('f.md:1 private-term-2'), res.out);
+  assert.ok(res.lines.includes('.github/CODEOWNERS:1 private-term-1'), 'a comment line: ' + res.out);
+  assert.ok(res.lines.includes('.github/CODEOWNERS:2 private-term-1'), 'the path pattern: ' + res.out);
+  assert.ok(!res.out.toLowerCase().includes(SURNAME), 'output must never contain a private term');
+});
+
+test('13.1 private layer: a slug on only one of the two lists is not allowed (neither file alone lets a term through)', () => {
+  const onlyPublic = slugRepo(SLUG_OK, { allowLines: [] });
+  const a = scan(onlyPublic.repo, ['--private'], { SCRUB_DENYLIST: onlyPublic.deny });
+  assert.strictEqual(a.code, 1);
+  assert.ok(a.lines.includes('README.md:1 private-term-1'), a.out);
+  assert.match(a.out, /scrub public: PASS/);
+  const onlyPrivate = slugRepo(SLUG_OK, { rules: slugRules([]) });
+  const b = scan(onlyPrivate.repo, ['--private'], { SCRUB_DENYLIST: onlyPrivate.deny });
+  assert.strictEqual(b.code, 1);
+  assert.ok(b.lines.includes('README.md:1 private-term-1'), b.out);
+  assert.ok(hasHit(b, 'README.md', 'host-handle'), 'the public layer fails it too');
+  // An allow line is not a term, and a malformed one is a plain term (it never allows anything).
+  const odd = slugRepo(SLUG_OK, { allowLines: [`allow-slug ${SLUG}`] });
+  const c = scan(odd.repo, ['--private'], { SCRUB_DENYLIST: odd.deny });
+  assert.strictEqual(c.code, 1);
+  assert.ok(c.lines.includes('README.md:1 private-term-1'), c.out);
+});
+
+test('13.1 private layer through scanContent (the egress scan path): the same allowed places and the same failures', async () => {
+  const { pathToFileURL } = require('node:url');
+  const mod = await import(pathToFileURL(SCRIPT).href);
+  const dir = makeTempDir('scrub-slug');
+  made.push(dir);
+  const rulesFile = path.join(dir, 'rules.json');
+  fs.writeFileSync(rulesFile, JSON.stringify(slugRules(), null, 2));
+  const deny = path.join(dir, 'deny.txt');
+  fs.writeFileSync(deny, [SLUG_OWNER, SURNAME, `allow-slug: ${SLUG}`].join('\n') + '\n');
+  const both = ['public', 'private'];
+  const rulesOf = (p, text, kind = 'file') => mod.scanContent({ path: p, text, kind, layers: both, denylistPath: deny, rulesPath: rulesFile }).map((h) => h.rule);
+  assert.deepStrictEqual(rulesOf('README.md', `${installLine(SLUG)}#v1.0.0`), []);
+  assert.deepStrictEqual(rulesOf('x.json', `"repository": "${codeHostUrl(SLUG_OWNER, 'zqrepo')}"`), []);
+  assert.deepStrictEqual(rulesOf('.github/CODEOWNERS', `src/** @${SLUG_OWNER}`), []);
+  assert.deepStrictEqual(rulesOf('a.md', `by ${SLUG_OWNER}`), ['private-term-1']);
+  assert.deepStrictEqual(rulesOf('a.md', `by ${SURNAME}`), ['private-term-2']);
+  assert.deepStrictEqual(rulesOf(null, `fill the install line with ${SLUG_OWNER}`, 'message'), ['private-term-1']);
+  assert.deepStrictEqual(rulesOf(null, `${SLUG_OWNER}-branch`, 'ref'), ['private-term-1']);
 });
 
 // ---------- scanContent (used by the egress scan) ----------

@@ -1,6 +1,6 @@
 # Install
 
-This page covers both ways to install the kit, the notes for each system, uninstall and troubleshooting. `<owner>/<repo>` is a placeholder, filled in when the project's host repository exists.
+This page covers both ways to install the kit, the notes for each system, uninstall and troubleshooting.
 
 ## Before you start
 
@@ -12,14 +12,14 @@ This page covers both ways to install the kit, the notes for each system, uninst
 ## Plugin install
 
 ```
-/plugin marketplace add <owner>/<repo>#v<version>
+/plugin marketplace add robguida/pocotoko#v<version>
 claude plugin install pocotoko@pocotoko
 claude plugin install pocotoko-search@pocotoko
 ```
 
-The last line is optional and adds search. The one-command form is `claude plugin install pocotoko --marketplace <owner>/<repo>`.
+The last line is optional and adds search. The one-command form is `claude plugin install pocotoko --marketplace robguida/pocotoko`.
 
-- Pin a version with `#`, as shown. A tag after `@` on a full web address is read as the address of a marketplace file, and fails.
+- Pin a version with `#`, as shown: replace `<version>` with a release number. A tag after `@` on a full web address is read as the address of a marketplace file, and fails.
 - Then, if you want to change a default, run `/plugin configure`. See `session-limits.md` for the meter options and `search.md` for the search options.
 - To show the meter on the status line, run the `meter-statusline` skill.
 - Install and enable the search plugin before you start a session. Adding an MCP server in the middle of a chat can rebuild the cache (see `prompt-cache.md`).
@@ -355,6 +355,6 @@ These are open. Nothing here is stated as fact.
 - **PENDING:** whether a never-set boolean or number option that has a default (`drop_contacts`, `max_file_bytes`) blocks the search server, and what text arrives. The checks applied only a text default.
 - **PENDING:** whether the plugin cache folder variable (`CLAUDE_CODE_PLUGIN_CACHE_DIR`) reaches the search server when the cache is really moved to another place. In the checks it reached a plugin's server unchanged, but it was set to the default place there.
 - **PENDING:** the copy-by-hand step that registers the search server, on a machine with an organisation-managed MCP file. It was refused there. The step's arguments are proven; a run on a machine without that file is still needed.
-- **PENDING:** the `<owner>/<repo>` shorthand, and the pinned-version form, against a real host repository.
+- **PENDING:** both install forms, and the pinned-version form, run against the host repository.
 - **PENDING:** whether a project's own settings can move your config folder into the project. The kit's check for that is in place and tested, but the live behaviour has not been verified.
 - **PENDING:** a skill loading inside a live session. Its presence in the plugin's parts list has been checked.

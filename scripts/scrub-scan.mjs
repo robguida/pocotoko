@@ -9,7 +9,8 @@
 // Git runs with fixed arguments and no shell (13.6). One unreadable file never stops
 // the run: it is counted as failed, the other files are still scanned, and the run fails.
 // The private layer never prints a deny-list term: hits name the file, the line and the
-// term's index only.
+// term's index only. Its only allowed hits are the one LICENSE copyright line and the install
+// slug on both allow lists, in the places allowedSpans names.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -181,6 +182,9 @@ function loadRules(file) {
   const hh = r.host_handle;
   c.hostUrl = re({ pattern: hh.url_pattern, flags: hh.flags });
   c.hostInstall = re({ pattern: hh.install_pattern, flags: hh.flags });
+  // The same patterns with match indices, for the private layer's allowed spans.
+  c.hostUrlD = new RegExp(c.hostUrl.source, `${c.hostUrl.flags}d`);
+  c.hostInstallD = new RegExp(c.hostInstall.source, `${c.hostInstall.flags}d`);
   c.ownerPlaceholders = new Set(hh.owner_placeholders.map((s) => s.toLowerCase()));
   c.hostReserved = new Set(hh.host_reserved_paths.map((s) => s.toLowerCase()));
   c.slugAllow = new Set((hh.install_slug_allow || []).map((s) => s.toLowerCase()));
@@ -533,18 +537,91 @@ function loadDenylist(top) {
   } catch (_) {
     return { error: 'deny-list file unreadable' };
   }
-  const terms = parseDenyTerms(text);
+  const { terms, allowSlugs } = parseDenyList(text);
   if (terms.length === 0) return { error: 'deny-list has no terms' };
-  return { terms };
+  return { terms, allowSlugs };
 }
 
-function parseDenyTerms(text) {
-  return text
-    .replace(/^\uFEFF/, '')
-    .split(/\r\n|\n|\r/)
-    .map((l) => l.trim())
-    .filter((l) => l && !l.startsWith('#'))
-    .map((l) => l.toLowerCase());
+// The deny-list file: one term per line; `#` starts a comment line. A line
+// `allow-slug: <owner>/<repo>` is not a term: it is a private allow entry (13.1). A slug is
+// allowed by the private layer only when it is ALSO on the public `install_slug_allow` list,
+// so neither file alone can let a private term through.
+const ALLOW_SLUG_RE = /^allow-slug:\s*([a-z0-9_.-]+\/[a-z0-9_.-]+)$/;
+
+function parseDenyList(text) {
+  const terms = [];
+  const allowSlugs = [];
+  for (const raw of text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/)) {
+    const l = raw.trim().toLowerCase();
+    if (!l || l.startsWith('#')) continue;
+    const m = ALLOW_SLUG_RE.exec(l);
+    if (m) allowSlugs.push(m[1]);
+    else terms.push(l);
+  }
+  return { terms, allowSlugs };
+}
+
+// The slugs the private layer allows: on both lists. Returns [{ owner, repo, slug }].
+function privateSlugs(c, allowSlugs) {
+  const out = [];
+  for (const slug of allowSlugs || []) {
+    if (!c.slugAllow.has(slug)) continue;
+    const [owner, repo] = slug.split('/');
+    out.push({ owner, repo, slug });
+  }
+  return out;
+}
+
+const SLUG_CHAR = /[A-Za-z0-9_-]/;
+
+// Spans [start, end) on one line where an allowed slug may stand (13.1, private layer):
+// the whole `<owner>/<repo>` of an install line or a host web address (the public layer's own
+// patterns); in `.github/CODEOWNERS`, an `@<owner>` entry on an owner line (not a comment, not
+// the path pattern); in `scripts/scrub-rules.json`, the quoted slug on the `install_slug_allow`
+// line. Anywhere else a term hit still counts.
+function allowedSpans(c, rel, line, slugs) {
+  const spans = [];
+  if (!slugs.length) return spans;
+  const bySlug = new Map(slugs.map((s) => [s.slug, s]));
+  const fromMatch = (m, gOwner, gRepo) => {
+    const owner = m[gOwner];
+    const repoRaw = m[gRepo];
+    if (!owner || !repoRaw) return;
+    const repo = repoRaw.replace(/\.git$/i, '');
+    if (!bySlug.has(`${owner}/${repo}`.toLowerCase())) return;
+    const start = m.indices[gOwner][0];
+    const end = m.indices[gRepo][1];
+    const after = line[end];
+    if (after !== undefined && SLUG_CHAR.test(after)) return;
+    spans.push([start, end]);
+  };
+  for (const m of line.matchAll(c.hostUrlD)) fromMatch(m, 2, 3);
+  for (const m of line.matchAll(c.hostInstallD)) fromMatch(m, 1, 2);
+  if (rel === '.github/CODEOWNERS' && !line.trim().startsWith('#')) {
+    const owners = new Set(slugs.map((s) => s.owner));
+    const tokenRe = /\S+/g;
+    let m;
+    let first = true;
+    while ((m = tokenRe.exec(line)) !== null) {
+      if (first) { first = false; continue; }
+      if (m[0].startsWith('#')) break;
+      if (m[0].startsWith('@') && owners.has(m[0].slice(1).toLowerCase())) spans.push([m.index + 1, m.index + m[0].length]);
+    }
+  }
+  if (rel === 'scripts/scrub-rules.json' && /^\s*"install_slug_allow"\s*:/.test(line)) {
+    for (const s of slugs) {
+      const needle = `"${s.slug}"`;
+      const lower = line.toLowerCase();
+      let from = 0;
+      for (;;) {
+        const at = lower.indexOf(needle, from);
+        if (at < 0) break;
+        spans.push([at + 1, at + 1 + s.slug.length]);
+        from = at + 1;
+      }
+    }
+  }
+  return spans;
 }
 
 // Per-file, per-rule exemptions with a hit limit. Returns the hits that still count, plus a
@@ -602,9 +679,9 @@ function cachedDenyTerms(file) {
     } catch (_) {
       throw new Error('deny-list file missing or unreadable');
     }
-    const terms = parseDenyTerms(text);
-    if (terms.length === 0) throw new Error('deny-list has no terms');
-    denyCache.set(abs, terms);
+    const parsed = parseDenyList(text);
+    if (parsed.terms.length === 0) throw new Error('deny-list has no terms');
+    denyCache.set(abs, parsed);
   }
   return denyCache.get(abs);
 }
@@ -649,22 +726,32 @@ export function scanContent({ path: relPath = null, text = '', kind = 'file', la
   if (Array.isArray(layers) && layers.includes('private')) {
     const file = denylistPath || (env && env[DENYLIST_ENV]);
     if (!file) throw new Error('deny-list not configured');
-    const terms = cachedDenyTerms(file);
-    for (const h of scanPrivate(terms, kind === 'file' ? rel : '', body, ctx)) push(h.rule);
+    const { terms, allowSlugs } = cachedDenyTerms(file);
+    const slugs = privateSlugs(c, allowSlugs);
+    for (const h of scanPrivate(terms, kind === 'file' ? rel : '', body, ctx, c, slugs)) push(h.rule);
     if (kind === 'file' && rel) for (const rule of scanPrivatePath(terms, rel)) push(`${rule}-in-path`);
   }
   return out;
 }
 
-function scanPrivate(terms, rel, text, ctx) {
+// slugs: the allowed slugs (privateSlugs). A term hit counts unless it lies wholly inside an
+// allowed span of its line, or is on the one LICENSE copyright line.
+function scanPrivate(terms, rel, text, ctx, c = null, slugs = []) {
   const hits = new Map();
   const lines = text.split(/\r\n|\n|\r/);
   lines.forEach((line, idx) => {
     const lower = line.toLowerCase();
+    let spans = null;
     terms.forEach((term, t) => {
-      if (literalWholeHits(lower, term).length === 0) return;
+      const found = literalWholeHits(lower, term);
+      if (found.length === 0) return;
       const ln = idx + 1;
       if (rel === 'LICENSE' && ctx.licenseCopyright === ln) return;
+      if (c && slugs.length) {
+        if (spans === null) spans = allowedSpans(c, rel, line, slugs);
+        const inSpan = (at) => spans.some(([s, e]) => at >= s && at + term.length <= e);
+        if (found.every(inSpan)) return;
+      }
       hits.set(`${ln}\u0000${t}`, { line: ln, rule: `private-term-${t + 1}` });
     });
   });
@@ -731,6 +818,7 @@ function main() {
 
   let deny = null;
   if (args.private) deny = loadDenylist(top);
+  const slugs = deny && deny.terms ? privateSlugs(c, deny.allowSlugs) : [];
 
   const ctx = { canonical: readCanonical(c, top, files), licenseCopyright: 0 };
   const counts = { succeeded: 0, failed: 0, skipped: 0 };
@@ -780,7 +868,7 @@ function main() {
       const hits = scanPublic(c, ctx, rel, text);
       perFile.set(rel, hits);
       if (deny && deny.terms) {
-        for (const h of scanPrivate(deny.terms, rel, text, ctx)) privateHits.push({ file: rel, ...h });
+        for (const h of scanPrivate(deny.terms, rel, text, ctx, c, slugs)) privateHits.push({ file: rel, ...h });
         for (const rule of scanPrivatePath(deny.terms, rel)) {
           privateHits.push({ file: withheld(fileIndex), line: 0, rule: `${rule}-in-path` });
         }
