@@ -821,11 +821,31 @@ test('6.11 h (child process): a skill file in a git work tree, the session start
   }
 });
 
-test('6.11 f (child process): a handoff_dir holding a tag character, U+E0000, a soft hyphen or a run of variation selectors -> exit 0, no folder line, the character and the name sent nowhere, nothing on stderr', () => {
+// A file system may refuse a folder name holding an unassigned code point: macOS (APFS) gives
+// ENOENT for U+E0000. Only these codes count as such a refusal; any other error fails the test.
+const NAME_REFUSED_CODES = Object.freeze(['ENOENT', 'EILSEQ', 'EINVAL']);
+const codePoints = (s) => [...s].map((c) => 'U+' + c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')).join(' ');
+
+test('6.11 f (child process): a handoff_dir holding a tag character, U+E0000, a soft hyphen or a run of variation selectors -> exit 0, no folder line, the character and the name sent nowhere, nothing on stderr', (t) => {
   const b = H.makeBase('ss-child-fmt');
   const kit = H.pluginKit(b);
+  let ran = 0;
   for (const ch of ['\u{e0041}', '\u{e0000}', '\u00ad', '\u{e0100}\u{e0101}', '\ufe0f\ufe0f']) {
-    const odd = H.mk(b.base, 'n' + ch + 'hidden');
+    const cps = codePoints(ch);
+    // String level, every OS, no folder needed: the path is never printable, and the value is
+    // refused while no such folder exists.
+    const oddPath = path.join(b.base, 'n' + ch + 'hidden');
+    assert.equal(S.printablePath(oddPath), false, cps + ': never printable');
+    assert.deepEqual(M.resolveHandoffDir(oddPath, { projectDir: b.proj, cwd: b.proj, gitCeiling: b.base }), { refused: true }, cps + ': refused while the folder does not exist');
+    let odd;
+    try {
+      odd = H.mk(b.base, 'n' + ch + 'hidden');
+    } catch (err) {
+      if (!err || !NAME_REFUSED_CODES.includes(err.code)) throw err;
+      t.diagnostic(cps + ': this file system refuses a folder name holding it (' + err.code + '), so only the string-level checks run for it');
+      continue;
+    }
+    ran++;
     const r = childStart(b, kit, { env: H.pluginEnv(b, kit, { handoff_dir: odd }), input: startInput(b) });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(r.stderr, '');
@@ -836,6 +856,7 @@ test('6.11 f (child process): a handoff_dir holding a tag character, U+E0000, a 
     assert.equal(lineWith(out, S.LINES.FOLDER_PREFIX), null);
     assert.ok(out.hookSpecificOutput.additionalContext.includes(S.YOURS_WIN), 'the rest still comes');
   }
+  assert.ok(ran > 0, 'at least one name ran in a real process (every folder name was refused)');
 });
 
 // A RegExp stand-in that throws on \p{...}, as a Node built without its Unicode property data does.
