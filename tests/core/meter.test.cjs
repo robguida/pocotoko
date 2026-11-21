@@ -823,11 +823,13 @@ test('6.6 (end gate round 4, U-1): the budget edge with a link: 254 parts + one 
   const d = last(256);
   const fd = budgetFake(d.links);
   budgetRun(d.value, fd);
+  assert.equal(fd.calls.lstat + fd.calls.readlink, 256, 'at most 256 calls: the 257th (the readlink) is never made');
   assert.equal(fd.calls.realpath, 0, 'the readlink as the 257th call: refused');
 });
 
 test('6.6 (end gate round 4, N4-3): a relative link target holding a colon (a drive-relative or stream form) refuses the value without being joined as a name (fake file system)', () => {
-  for (const target of ['C:foo', 'foo:bar', '..' + BS + 'x:y']) {
+  // (x:y\..\z: the join would cancel the colon part, so the rule must read the target itself.)
+  for (const target of ['C:foo', 'foo:bar', '..' + BS + 'x:y', 'x:y' + BS + '..' + BS + 'z']) {
     const link = 'C:' + BS + 'a' + BS + 'l';
     const f = fakeFs({ links: { [link]: target } });
     const out = M.resolveHandoffDir(link + BS + 'x', { projectDir: '', cwd: '', platform: 'win32', _realpath: f.realpath, _lstat: f.lstat, _readlink: f.readlink });
@@ -839,6 +841,14 @@ test('6.6 (end gate round 4, N4-3): a relative link target holding a colon (a dr
   const ok = fakeFs({ links: { ['C:' + BS + 'a' + BS + 'l']: 'D:' + BS + 'b' } });
   M.resolveHandoffDir('C:' + BS + 'a' + BS + 'l', { projectDir: '', cwd: '', platform: 'win32', _realpath: ok.realpath, _lstat: ok.lstat, _readlink: ok.readlink });
   assert.equal(ok.calls.realpath.length, 1, 'a drive target: walked, then resolved');
+  // An absolute target with a stream colon is a drive path too: walked like any other (the
+  // colon rule is for relative targets only).
+  for (const target of ['D:' + BS + 'b:s', 'D:' + BS + 'dir::$INDEX_ALLOCATION']) {
+    const f = fakeFs({ links: { ['C:' + BS + 'a' + BS + 'l']: target } });
+    M.resolveHandoffDir('C:' + BS + 'a' + BS + 'l', { projectDir: '', cwd: '', platform: 'win32', _realpath: f.realpath, _lstat: f.lstat, _readlink: f.readlink });
+    assert.ok(f.calls.lstat.includes(target), target + ': its target walked');
+    assert.equal(f.calls.realpath.length, 1, target + ': walked, then resolved');
+  }
 });
 
 test('6.6 (end gate round 3, R3-2, child process): a handoff_dir through a loop of two local links is refused quickly: exit 0, no blocking field, the refusal line once, nothing on stderr', () => {

@@ -165,6 +165,7 @@ test('12.2 f (end gate round 4, U-2): the --check rows are wired to their judges
   // The launcher row (fireWithCeiling): its status comes from the judge's answer.
   assert.equal(count('const okSs = seamSessionStartOk({ status: ss.status, hook: j, block });'), 1, 'the launcher row calls seamSessionStartOk');
   assert.equal(count("status: okSs ? 'done' : 'failed'"), 1, 'the launcher row reports the judge');
+  assert.equal(count("out.push({ id: 'fire ' + ev, status: ok ? 'done' : 'failed'"), 1, 'the plain row reports its ok');
   // Each judge is called only there (the definitions read "({ status, hook"), so no other path
   // stands in for it.
   assert.equal(count('plainSessionStartOk({ status: '), 1);
