@@ -543,7 +543,13 @@ const cpuSince = (a) => { const b = cpuNow(); return ((b.user - a.user) + (b.sys
  * (tripP), and the part inside the tail (tripP to endP). A pause wholly before
  * the line is not taken off, because the code sees it in the clock and stops on
  * time anyway. gcs is a list of { startTime, duration } (performance clock, ms).
- * Never takes off more than a span holds. Pure: no clock, no I/O.
+ * The pause comes off the wall-clock measure only. The CPU measure stays as
+ * measured: a pause's length is not all CPU time of this thread (it can wait
+ * on helper threads or be descheduled), so taking the full length off CPU too
+ * could remove real code time and let a late guard pass. The caller's smaller
+ * of the two measures therefore never under-counts the code.
+ * Never takes off more than a span holds, and each window is capped at its own
+ * length, so overlapping entries cannot take off more than the window holds. Pure: no clock, no I/O.
  * Returns { total, tail, gcPast, gcTail }.
  */
 function takeOffGc({ gcs, budgetLine, tripP, endP, total, tail }) {
@@ -552,14 +558,14 @@ function takeOffGc({ gcs, budgetLine, tripP, endP, total, tail }) {
     const hi = Math.min(b, g.startTime + g.duration);
     return hi > lo ? sum + (hi - lo) : sum;
   }, 0);
-  const gcPast = inside(budgetLine, tripP);
-  const gcTail = inside(tripP, endP);
+  const gcPast = Math.min(inside(budgetLine, tripP), Math.max(0, tripP - budgetLine));
+  const gcTail = Math.min(inside(tripP, endP), Math.max(0, endP - tripP));
   const less = (x, n) => Math.max(0, x - n);
   return {
     gcPast,
     gcTail,
-    total: { wall: less(total.wall, gcPast + gcTail), cpu: less(total.cpu, gcPast + gcTail) },
-    tail: { wall: less(tail.wall, gcTail), cpu: less(tail.cpu, gcTail) },
+    total: { wall: less(total.wall, gcPast + gcTail), cpu: total.cpu },
+    tail: { wall: less(tail.wall, gcTail), cpu: tail.cpu },
   };
 }
 
@@ -587,7 +593,8 @@ async function timedRank(idx, query, options) {
     else if (trip === null && t - start >= budget) trip = { wall: t, cpu: cpuNow(), p: performance.now() };
     return t;
   };
-  const obs = new PerformanceObserver(() => {});
+  const seen = [];
+  const obs = new PerformanceObserver((list) => { seen.push(...list.getEntries()); });
   obs.observe({ entryTypes: ['gc'] });
   let r;
   let wall0;
@@ -608,7 +615,7 @@ async function timedRank(idx, query, options) {
   }
   const tailCpu = trip ? cpuSince(trip.cpu) : null;
   await new Promise((res) => setImmediate(res)); // gc entries are queued, not synchronous
-  const gcs = obs.takeRecords();
+  const gcs = seen.concat(obs.takeRecords());
   obs.disconnect();
   let total = { wall: wall1 - wall0, cpu: cpuTotal };
   let tail = trip ? { wall: wall1 - trip.wall, cpu: tailCpu } : null;
@@ -663,7 +670,7 @@ test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, e
   // The budget runs out inside the exact pass itself: partial at once, holding the exact hits scored so far.
   for (const matching of ['exact', 'broad']) {
     const m = await timedRank(idx, query, { matching, budgetMs: 0 });
-    t.diagnostic(`${matching}, 0 ms budget: total ${show(m.total)}`);
+    t.diagnostic(`${matching}, 0 ms budget: total ${show(m.total)}; gc taken off ${Math.round(m.gc.past + m.gc.tail)} ms`);
     assert.equal(m.r.partial, true, matching);
     assert.ok(m.tail, matching + ': the guard tripped');
     assert.ok(own(m.total) <= TAIL_MS, `${matching}: with no budget, total measured ${show(m.total)}`);
@@ -680,7 +687,7 @@ test('T-16 helper: takeOffGc takes off only the pause past the budget line and t
   // A pause that crosses the line (from 1000 to 1380) is taken off the total only.
   let a = takeOffGc({ ...base, gcs: [{ startTime: 990, duration: 390 }] });
   same([a.gcPast, a.gcTail], [380, 0]);
-  same(a.total, { wall: 1070, cpu: 1060 });
+  same(a.total, { wall: 1070, cpu: 1440 });
   same(a.tail, { wall: 50, cpu: 48 });
   // A pause wholly before the line is NOT taken off (the code sees it in the clock).
   a = takeOffGc({ ...base, gcs: [{ startTime: 300, duration: 500 }, { startTime: 950, duration: 50 }] });
@@ -690,14 +697,14 @@ test('T-16 helper: takeOffGc takes off only the pause past the budget line and t
   // A pause inside the tail comes off the tail and the total.
   a = takeOffGc({ ...base, gcs: [{ startTime: 1410, duration: 30 }] });
   same([a.gcPast, a.gcTail], [0, 30]);
-  same(a.total, { wall: 1420, cpu: 1410 });
-  same(a.tail, { wall: 20, cpu: 18 });
+  same(a.total, { wall: 1420, cpu: 1440 });
+  same(a.tail, { wall: 20, cpu: 48 });
   // A pause that starts before the line counts only from the line on; one that
   // runs past the return counts only up to the return; both kinds add up.
   a = takeOffGc({ ...base, gcs: [{ startTime: 900, duration: 200 }, { startTime: 1440, duration: 100 }] });
   same([a.gcPast, a.gcTail], [100, 10]);
-  same(a.total, { wall: 1340, cpu: 1330 });
-  same(a.tail, { wall: 40, cpu: 38 });
+  same(a.total, { wall: 1340, cpu: 1440 });
+  same(a.tail, { wall: 40, cpu: 48 });
   // Several pauses add up; none: nothing changes.
   a = takeOffGc({ ...base, gcs: [{ startTime: 1100, duration: 40 }, { startTime: 1200, duration: 60 }] });
   same([a.gcPast, a.gcTail], [100, 0]);
@@ -709,7 +716,12 @@ test('T-16 helper: takeOffGc takes off only the pause past the budget line and t
   assert.ok(Math.min(a.tail.wall, a.tail.cpu) > 250);
   // Never more off than measured: clamped at 0.
   a = takeOffGc({ budgetLine: 0, tripP: 100, endP: 200, total: { wall: 60, cpu: 50 }, tail: { wall: 10, cpu: 8 }, gcs: [{ startTime: 0, duration: 200 }] });
-  same([a.total.wall, a.total.cpu, a.tail.wall, a.tail.cpu], [0, 0, 0, 0]);
+  same([a.total.wall, a.total.cpu, a.tail.wall, a.tail.cpu], [0, 50, 0, 8]);
+  // Overlapping entries cannot take off more than their window holds: three entries over
+  // the same 1100 to 1400 stretch add up to 900, but the window (1000 to 1400) holds 400.
+  a = takeOffGc({ ...base, gcs: [{ startTime: 1100, duration: 300 }, { startTime: 1100, duration: 300 }, { startTime: 1100, duration: 300 }] });
+  same([a.gcPast, a.gcTail], [400, 0]);
+  same(a.total, { wall: 1050, cpu: 1440 });
 });
 
 test('B6 review: every exact hit is scored before any expansion, so a partial result keeps them all', () => {
