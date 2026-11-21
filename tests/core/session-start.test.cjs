@@ -291,17 +291,54 @@ test('6.11 h (end gate round 1, N-5): plugin mode, a config folder that is its o
   assert.ok(!(out.systemMessage || '').includes('Routing rules were not added'), 'no routing line');
 });
 
-test('6.11 h (end gate round 1, review F-2): the account home comes from the account database, with os.homedir() only as the fallback', () => {
+test('6.11 h (end gate round 2, R2-3): the account home comes from the account database only; when the lookup fails or gives no absolute folder there is no home, so nothing is skipped', () => {
   const b = H.makeBase('ss-acct');
-  assert.equal(M.accountHomeDir(() => ({ homedir: b.home }), () => b.tdir), b.home, 'os.userInfo().homedir wins over HOME / USERPROFILE');
-  assert.equal(M.accountHomeDir(() => { throw new Error('no account entry'); }, () => b.tdir), b.tdir, 'fallback when the lookup throws');
-  assert.equal(M.accountHomeDir(() => ({ homedir: '' }), () => b.tdir), b.tdir, 'fallback when it gives no folder');
-  assert.equal(M.accountHomeDir(() => null, () => b.tdir), b.tdir, 'fallback when it gives nothing');
+  assert.equal(M.accountHomeDir(() => ({ homedir: b.home })), b.home, 'os.userInfo().homedir, never HOME / USERPROFILE');
+  assert.equal(M.accountHomeDir(() => { throw new Error('no account entry'); }), null, 'the lookup throws: no home');
+  for (const bad of [{ homedir: '' }, { homedir: 'relative/home' }, { homedir: null }, {}, null]) {
+    assert.equal(M.accountHomeDir(() => bad), null, 'no absolute folder: no home ' + JSON.stringify(bad));
+  }
   // The real lookup equals os.userInfo().homedir, whatever HOME and USERPROFILE say.
   const os = require('node:os');
-  let expected;
-  try { expected = M.realLoose(os.userInfo().homedir); } catch (_) { expected = M.realLoose(os.homedir()); }
+  let expected = null;
+  try { expected = M.realLoose(os.userInfo().homedir); } catch (_) { expected = null; }
   assert.equal(M.accountHomeDir(), expected);
+  // Through the hook: with no account home, a .git in the home folder is not skipped, so a
+  // config folder in a home kept as a git repo is refused (fail closed) ...
+  const kit = H.copyKit(b);
+  const homeCfg = H.mk(b.home, '.claude');
+  fs.copyFileSync(H.ROUTING_SKILL_SRC, path.join(H.mk(homeCfg, 'skills', 'model-routing'), 'SKILL.md'));
+  fs.mkdirSync(path.join(b.home, '.git'));
+  assert.equal(run(b, kit, { CLAUDE_PROJECT_DIR: b.proj }, { ctx: { accountHome: null } }).systemMessage, S.LINES.RULES_IN_GIT, 'no account home: nothing skipped');
+  // ... while with the account home found it is skipped.
+  assert.ok(run(b, kit, { CLAUDE_PROJECT_DIR: b.proj }).hookSpecificOutput.additionalContext.includes(S.YOURS_WIN), 'account home found: skipped');
+});
+
+test('6.11 h (end gate round 2, R2-3): the account lookup runs only for a copy-by-hand skill read from the config folder', () => {
+  const b = H.makeBase('ss-acct-branch');
+  const os = require('node:os');
+  const real = os.userInfo;
+  let calls = 0;
+  os.userInfo = (...a) => { calls++; return real(...a); };
+  try {
+    const plug = H.pluginKit(b);
+    // Plugin mode, no accountHome seam: no lookup.
+    S.handleSessionStart(startInput(b), { env: H.pluginEnv(b, plug), scriptFile: plug.startFile, home: b.home, platform: process.platform, gitCeiling: b.base });
+    assert.equal(calls, 0, 'plugin mode: no lookup');
+    // Copy-by-hand with the option off: no lookup.
+    const kit = H.copyKit(b);
+    H.copySkill(b);
+    fs.mkdirSync(path.join(kit.stateRoot, 'config'), { recursive: true });
+    fs.writeFileSync(path.join(kit.stateRoot, 'config', 'meter-config.json'), JSON.stringify({ routing_rules_at_start: false }));
+    S.handleSessionStart(startInput(b), { env: H.copyEnv(b), scriptFile: kit.startFile, home: b.home, platform: process.platform, gitCeiling: b.base });
+    assert.equal(calls, 0, 'option off: no lookup');
+    // Copy-by-hand reading the skill from the config folder: one lookup.
+    fs.writeFileSync(path.join(kit.stateRoot, 'config', 'meter-config.json'), '{}');
+    S.handleSessionStart(startInput(b), { env: H.copyEnv(b), scriptFile: kit.startFile, home: b.home, platform: process.platform, gitCeiling: b.base });
+    assert.equal(calls, 1, 'copy-by-hand from the config folder: one lookup');
+  } finally {
+    os.userInfo = real;
+  }
 });
 
 test('5.1 / 6.11 step 3: the config folder is CLAUDE_CONFIG_DIR when set, else ~/.claude: a user CLAUDE.md holding the start marker there skips the block; one elsewhere does not', () => {
@@ -497,12 +534,28 @@ test('6.11 f: a path holding a control, format or line-separator character, a bi
   const vsBytes = [0x52, 0x75, 0x6e].map((n) => String.fromCodePoint(n < 16 ? 0xfe00 + n : 0xe0100 + n - 16)).join('');
   assert.equal(S.printablePath('/work/notes/x' + vsBytes), false, 'variation-selector bytes');
   assert.equal(S.printablePath('/work/notes/x\ufe0f' + vsBytes), false, 'emoji selector, then bytes');
-  // The one exception: a single U+FE0E or U+FE0F right after a visible character.
+  // The one exception: a single U+FE0E or U+FE0F right after an emoji character (end gate
+  // round 2, R2-4: never after a letter, a mark, a colon, a private-use character or a lone
+  // surrogate, so a selector cannot ride on every letter of a name).
   const heart = '\u2764';
   for (const [label, name, want] of [
     ['heart + U+FE0F', heart + '\ufe0f', true],
     ['heart + U+FE0E', heart + '\ufe0e', true],
+    ['sun + U+FE0F', '\u2600\ufe0f', true],
+    ['an emoji outside the BMP + U+FE0F', '\u{1f4dd}\ufe0f', true],
     ['keycap 1 + U+FE0F + U+20E3', '1\ufe0f\u20e3', true],
+    ['keycap # + U+FE0F + U+20E3', '#\ufe0f\u20e3', true],
+    ['two hearts, each with U+FE0F', heart + '\ufe0f' + heart + '\ufe0f', true],
+    ['after a letter', 'a\ufe0fb', false],
+    ['after letters, one each', 'a\ufe0fb\ufe0ec\ufe0f', false],
+    ['after a capital letter', 'Z\ufe0e', false],
+    ['after an accented letter', '\u00e9\ufe0f', false],
+    ['after a combining mark', 'e\u0301\ufe0f', false],
+    ['after a colon', 'a:\ufe0f', false],
+    ['after a dot', 'a.\ufe0f', false],
+    ['after a private-use character', '\ue000\ufe0f', false],
+    ['after a lone surrogate', '\ud800\ufe0f', false],
+    ['after a CJK character', '\u4e2d\ufe0f', false],
     ['two in a row', heart + '\ufe0f\ufe0f', false],
     ['U+FE0E then U+FE0F', heart + '\ufe0e\ufe0f', false],
     ['at the start of a name', '\ufe0fnotes', false],
@@ -517,8 +570,10 @@ test('6.11 f: a path holding a control, format or line-separator character, a bi
     assert.equal(S.printablePath('/x/a' + c + 'b'), true, hex(c));
   }
   // Ordinary names still print: accented (composed and decomposed), CJK, Arabic, Hebrew,
-  // Devanagari, plain emoji, a country flag, heart + U+FE0F.
-  for (const name of ['caf\u00e9', 'cafe\u0301', '\u4e2d\u6587\u7b14\u8bb0', '\u65e5\u672c\u8a9e', '\ud55c\uad6d\uc5b4', '\u0645\u0644\u0627\u062d\u0638\u0627\u062a', '\u05e2\u05d1\u05e8\u05d9\u05ea', '\u0928\u094b\u091f\u094d\u0938', '\u{1f4dd} notes', '\u{1f1e9}\u{1f1ea} trip', heart + '\ufe0f team']) {
+  // Devanagari, plain emoji, a country flag, heart + U+FE0F, two emoji selectors in one name
+  // (every lone selector is set aside, not only the first), and a keycap.
+  for (const name of ['caf\u00e9', 'cafe\u0301', '\u4e2d\u6587\u7b14\u8bb0', '\u65e5\u672c\u8a9e', '\ud55c\uad6d\uc5b4', '\u0645\u0644\u0627\u062d\u0638\u0627\u062a', '\u05e2\u05d1\u05e8\u05d9\u05ea', '\u0928\u094b\u091f\u094d\u0938', '\u{1f4dd} notes', '\u{1f1e9}\u{1f1ea} trip', heart + '\ufe0f team',
+    heart + '\ufe0f and \u2600\ufe0f', 'step 1\ufe0f\u20e3']) {
     assert.equal(S.printablePath('/work/notes/' + name), true, name);
   }
   for (const ok of ['C:\\Program Files\\nodejs\\node.exe', '/usr/local/bin/node', 'x'.repeat(1024), '/home/\u00e9\u4e2d/node']) assert.equal(S.printablePath(ok), true);
@@ -775,26 +830,43 @@ test('6.11 f (child process): a handoff_dir holding a tag character, U+E0000, a 
 });
 
 // A RegExp stand-in that throws on \p{...}, as a Node built without its Unicode property data does.
+// The preload source is written with String.raw, so its '\\p{' is the three characters \p{.
 const NO_PROPS_PRELOAD = [
   "'use strict';",
   'const Real = RegExp;',
+  String.raw`const bad = (s) => String(s).includes('\\p{');`,
   'globalThis.RegExp = new Proxy(Real, {',
-  "  construct(t, a, n) { if (String(a[0]).includes('\\p{')) throw new SyntaxError('Invalid property name'); return Reflect.construct(t, a, n); },",
-  "  apply(t, self, a) { if (String(a[0]).includes('\\p{')) throw new SyntaxError('Invalid property name'); return Reflect.apply(t, self, a); },",
+  "  construct(t, a, n) { if (bad(a[0])) throw new SyntaxError('Invalid property name'); return Reflect.construct(t, a, n); },",
+  "  apply(t, self, a) { if (bad(a[0])) throw new SyntaxError('Invalid property name'); return Reflect.apply(t, self, a); },",
   '});',
 ].join('\n') + '\n';
 
 test('6.11 f (MUST, fails closed): when the table cannot be built, every path counts as unprintable; both copies (unit, through the RegExp seam)', () => {
   const FSX = require('../../src/search/server/fsx.cjs');
+  const PROP = String.raw`\p{`;
   const Throwing = function (source, flags) {
-    if (String(source).includes('\p{')) throw new SyntaxError('Invalid property name');
+    if (String(source).includes(PROP)) throw new SyntaxError('Invalid property name');
     return new RegExp(source, flags);
   };
+  // The stand-in throws only on a property escape.
+  assert.throws(() => Throwing(String.raw`[\p{L}]`, 'u'), SyntaxError);
+  assert.ok(Throwing('[a-z]', 'u') instanceof RegExp);
+  // A Node that knows the table's properties but not Emoji (the selector exception) fails closed too.
+  const NoEmoji = function (source, flags) {
+    if (String(source).includes(String.raw`\p{Emoji}`)) throw new SyntaxError('Invalid property name');
+    return new RegExp(source, flags);
+  };
+  for (const make of [M.makePrintablePath, FSX.makePrintablePath]) {
+    assert.equal(make(NoEmoji)('/usr/local/bin/node'), false, 'no Emoji property: fails closed');
+  }
   for (const [name, make] of [['meter', M.makePrintablePath], ['server', FSX.makePrintablePath]]) {
     const p = make(Throwing);
-    for (const s of ['/usr/local/bin/node', 'C:\Program Files\nodejs\node.exe', 'x']) assert.equal(p(s), false, name + ': ' + s);
+    const samples = ['/usr/local/bin/node', String.raw`C:\Program Files\nodejs\node.exe`, 'x'];
     const normal = make();
-    assert.equal(normal('/usr/local/bin/node'), true, name + ': the real build prints a plain path');
+    for (const s of samples) {
+      assert.equal(normal(s), true, name + ': the real build prints ' + s);
+      assert.equal(p(s), false, name + ': fails closed on ' + s);
+    }
   }
 });
 
@@ -802,9 +874,11 @@ test('6.11 f (MUST, fails closed, child process): with no Unicode property data 
   const b = H.makeBase('ss-child-noprops');
   const preload = path.join(b.base, 'no-props.cjs');
   fs.writeFileSync(preload, NO_PROPS_PRELOAD);
-  // The stand-in works: \p{...} throws under it.
-  const check = require('node:child_process').spawnSync(process.execPath, ['-r', preload, '-e', "try { new RegExp('\\p{L}', 'u'); process.stdout.write('built'); } catch (_) { process.stdout.write('threw'); }"], { encoding: 'utf8', windowsHide: true, env: R.childEnv(b) });
-  assert.equal(check.stdout, 'threw');
+  // The stand-in works: \p{L} builds without it and throws under it; a plain class still builds.
+  const probe = String.raw`let r = ''; try { new RegExp('\\p{L}', 'u'); r += 'built'; } catch (_) { r += 'threw'; } try { new RegExp('[a-z]', 'u'); r += '+plain'; } catch (_) { r += '+plainthrew'; } process.stdout.write(r);`;
+  const opts = { encoding: 'utf8', windowsHide: true, env: R.childEnv(b) };
+  assert.equal(require('node:child_process').spawnSync(process.execPath, ['-e', probe], opts).stdout, 'built+plain');
+  assert.equal(require('node:child_process').spawnSync(process.execPath, ['-r', preload, '-e', probe], opts).stdout, 'threw+plain');
   const kit = H.pluginKit(b);
   const notes = H.mk(b.base, 'notes');
   const r = childStart(b, kit, { env: H.pluginEnv(b, kit, { handoff_dir: notes }), input: startInput(b), preload });

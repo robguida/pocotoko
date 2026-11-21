@@ -765,7 +765,8 @@ test('9.8 / SR-12: the search server\'s copy of the 6.11 f table and cap (server
   // L-1 and end gate round 1: every character the search server's file-name class refuses
   // (walker.cjs, envelope.cjs), the whole tag block and every default-ignorable code point is
   // never printed in a path by either plugin, with the one exception: a lone U+FE0E or U+FE0F
-  // after a visible character. Every other code point swept gives the same answer in both.
+  // right after an emoji character (never after the letter 'a' used here). Every code point
+  // swept gives the same answer in both, alone and after a heart.
   assert.equal(FSX.LONE_PRESENTATION_SELECTOR, M.LONE_PRESENTATION_SELECTOR);
   const serverClass = /^[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]$/u;
   let refused = 0;
@@ -774,17 +775,22 @@ test('9.8 / SR-12: the search server\'s copy of the 6.11 f table and cap (server
     if (cp > 0xffff && cp < 0xe0000 && ![0x110bd, 0x1bca0, 0x1bca3, 0x1d173, 0x1d17a, 0x1f600, 0x1f1e6].includes(cp)) continue;
     const ch = String.fromCodePoint(cp);
     const p = '/x/a' + ch + 'b';
+    const afterHeart = '/x/❤' + ch + 'b';
     assert.equal(FSX.printablePath(p), M.printablePath(p), 'same answer U+' + cp.toString(16));
-    const must = (serverClass.test(ch) || (cp >= 0xe0000 && cp <= 0xe007f)) && cp !== 0xfe0e && cp !== 0xfe0f;
+    assert.equal(FSX.printablePath(afterHeart), M.printablePath(afterHeart), 'same answer after a heart U+' + cp.toString(16));
+    const must = serverClass.test(ch) || (cp >= 0xe0000 && cp <= 0xe007f);
     if (!must) continue;
     refused++;
     assert.equal(M.printablePath(p), false, 'meter U+' + cp.toString(16));
+    if (cp !== 0xfe0e && cp !== 0xfe0f) assert.equal(M.printablePath(afterHeart), false, 'meter after a heart U+' + cp.toString(16));
   }
   assert.ok(refused > 4000, 'the sweep found the classes');
   for (const ch of ['︎', '️']) {
-    assert.equal(M.printablePath('/x/a' + ch + 'b'), true, 'a lone selector after a letter');
-    assert.equal(M.printablePath('/x/a' + ch + ch + 'b'), false, 'two in a row');
-    assert.equal(FSX.printablePath('/x/a' + ch + ch + 'b'), false, 'two in a row (server)');
+    for (const [P, label] of [[M, 'meter'], [FSX, 'server']]) {
+      assert.equal(P.printablePath('/x/❤' + ch + 'b'), true, label + ': a lone selector after a heart');
+      assert.equal(P.printablePath('/x/a' + ch + 'b'), false, label + ': never after a letter');
+      assert.equal(P.printablePath('/x/❤' + ch + ch + 'b'), false, label + ': two in a row');
+    }
   }
   assert.equal(SRV.LINES.FOLDER_UNPRINTABLE, '(not shown: the folder path holds a character that cannot be shown safely, or is over 1,024 characters)');
 });

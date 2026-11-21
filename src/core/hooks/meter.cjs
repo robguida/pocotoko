@@ -95,11 +95,11 @@ const UNPRINTABLE_CLASSES = Object.freeze({
   ignorable: '\\p{Default_Ignorable_Code_Point}',
 });
 // 6.11 f: the one character of the set that may stand in a printed path: a single U+FE0E or
-// U+FE0F (text or emoji presentation, as in heart + U+FE0F) right after a character that is
-// not a space, a slash or a variation selector. Two or more variation selectors in a row are
-// never printed (hidden-byte encodings use runs): each one after the first follows a variation
-// selector, and every other variation selector is in the table.
-const LONE_PRESENTATION_SELECTOR = '(?<=[^\\s/\\\\\\ufe00-\\ufe0f\\u{e0100}-\\u{e01ef}])[\\ufe0e\\ufe0f]';
+// U+FE0F (text or emoji presentation) right after an emoji character (Unicode property Emoji:
+// a heart, a sun, a flag letter, a keycap digit, # or *). Never after a letter, a mark, a
+// punctuation sign, a space or a slash. Two or more variation selectors in a row are never
+// printed: a variation selector is not an emoji character, and every other one is in the table.
+const LONE_PRESENTATION_SELECTOR = '(?<=\\p{Emoji})[\\ufe0e\\ufe0f]';
 
 const SESSION_FILE_RE = /^(?:[a-z0-9_-]{1,64}|h-[0-9a-f]{32})\.json$/;
 // <name>.<pid>.<16 hex>.tmp; group 1 is <name>. Temp cleanup removes a match only when
@@ -255,18 +255,19 @@ function homeDir() {
 
 /**
  * The account's own home folder, from the account database (`os.userInfo`), never from HOME
- * or USERPROFILE, which a project's settings could set (6.11 h). os.homedir() only when the
- * account lookup fails or gives no folder. _userInfo, _homedir: test-only seams.
+ * or USERPROFILE, which a project's settings could set (6.11 h). Fails closed: when the
+ * lookup throws (an account with no entry, as in some containers) or gives no absolute
+ * folder, the answer is null, and the caller then skips nothing. _userInfo: test-only seam.
  */
-function accountHomeDir(_userInfo = os.userInfo, _homedir = os.homedir) {
-  let h = null;
+function accountHomeDir(_userInfo = os.userInfo) {
+  let h;
   try {
     const u = _userInfo();
-    if (u && typeof u.homedir === 'string' && u.homedir !== '') h = u.homedir;
+    h = u && typeof u.homedir === 'string' ? u.homedir : '';
   } catch (_) {
-    h = null;
+    return null;
   }
-  if (!h) h = _homedir();
+  if (!path.isAbsolute(h)) return null;
   return realLoose(h);
 }
 
@@ -973,6 +974,52 @@ function isWindowsNetworkOrDevicePath(p, platform = process.platform) {
   return isWindows(platform) && typeof p === 'string' && /^[\\/]{2}/.test(p);
 }
 
+// A stored link target that names another computer or a device: two leading slashes of either
+// kind, or the NT forms `\??\UNC\` and `UNC\` (in case a target is read back undecoded).
+const NETWORK_TARGET_RE = /^(?:[\\/]{2}|\\\?\?\\UNC\\|UNC\\)/i;
+const LINK_DEPTH_MAX = 32;
+
+/**
+ * 6.6 (Windows only): true when any part of p, walked from its root down, is a link (a
+ * symbolic link or a junction) whose stored target names a network or device path, or a
+ * local target that does so in turn. Each part is read with lstat (which never follows the
+ * part itself) and each link with readlink, so nothing is resolved and no network connection
+ * is made. Fails closed: an lstat error other than not-found, a readlink error, or a chain
+ * deeper than LINK_DEPTH_MAX counts as true. A part that does not exist ends the walk (the
+ * real-path step then refuses the value). On macOS and Linux a leading // is an ordinary
+ * path, so the walk does not run.
+ */
+function linkToNetwork(p, platform = process.platform, _lstat = fs.lstatSync, _readlink = fs.readlinkSync, depth = 0) {
+  if (!isWindows(platform)) return false;
+  if (depth > LINK_DEPTH_MAX) return true;
+  const P = pathApi(platform);
+  if (typeof p !== 'string' || NETWORK_TARGET_RE.test(p) || !isAbsoluteFor(p, platform)) return true;
+  const root = P.parse(p).root;
+  const parts = p.slice(root.length).split(/[\\/]+/).filter(Boolean);
+  let cur = root;
+  for (const part of parts) {
+    cur = P.join(cur, part);
+    let st;
+    try {
+      st = _lstat(cur);
+    } catch (err) {
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return false;
+      return true;
+    }
+    if (!st.isSymbolicLink()) continue;
+    let target;
+    try {
+      target = String(_readlink(cur));
+    } catch (_) {
+      return true;
+    }
+    if (NETWORK_TARGET_RE.test(target)) return true;
+    const next = P.isAbsolute(target) ? target : P.resolve(P.dirname(cur), target);
+    if (linkToNetwork(next, platform, _lstat, _readlink, depth + 1)) return true;
+  }
+  return false;
+}
+
 /**
  * The `handoff_dir` option (6.6, SR-C6): absolute, existing folder, resolved to its real
  * path once. Refused when it is a Windows network or device path (tested on the string,
@@ -980,11 +1027,14 @@ function isWindowsNetworkOrDevicePath(p, platform = process.platform) {
  * (configDir, a real path), inside the current project (CLAUDE_PROJECT_DIR or the hook
  * input's cwd) or inside any git work tree. The config-folder and project checks run twice:
  * first on the value as written, before its links are resolved (so a link inside the
- * project is refused without being followed), then on its real path. The git check needs
- * the file system, so it runs on the real path only. Returns { dir } | { refused: true }.
- * _realpath: test-only seam.
+ * project is refused without being followed), then on its real path. Before the real-path
+ * step, on Windows, linkToNetwork walks the value's parts and refuses a link that points at a
+ * network or device path, so no link is ever followed to another computer, whatever name form
+ * (a short 8.3 name, a link inside some other repo) the value uses. The git check then runs on
+ * the real path. Returns { dir } | { refused: true }.
+ * _realpath, _lstat, _readlink: test-only seams.
  */
-function resolveHandoffDir(value, { projectDir, cwd, configDir = null, platform = process.platform, gitCeiling = null, _realpath = fs.realpathSync.native }) {
+function resolveHandoffDir(value, { projectDir, cwd, configDir = null, platform = process.platform, gitCeiling = null, _realpath = fs.realpathSync.native, _lstat = fs.lstatSync, _readlink = fs.readlinkSync }) {
   const s = typeof value === 'string' ? value.trim() : '';
   if (!isAbsoluteFor(s, platform)) return { refused: true };
   if (isWindowsNetworkOrDevicePath(s, platform)) return { refused: true };
@@ -996,6 +1046,7 @@ function resolveHandoffDir(value, { projectDir, cwd, configDir = null, platform 
     try { fenced.push(fs.realpathSync.native(p)); } catch (_) { /* the written form is checked */ }
   }
   if (fenced.some((f) => isInside(s, f, platform))) return { refused: true };
+  if (linkToNetwork(s, platform, _lstat, _readlink)) return { refused: true };
   let real;
   try {
     real = _realpath(s);
@@ -1448,6 +1499,7 @@ module.exports = {
   noteBaseName,
   precreateNote,
   isWindowsNetworkOrDevicePath,
+  linkToNetwork,
   resolveHandoffDir,
   handlePrompt,
   statusSize,

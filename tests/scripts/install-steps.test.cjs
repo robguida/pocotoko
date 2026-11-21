@@ -110,6 +110,30 @@ test('validateSteps refuses a type outside the closed set, an unknown placeholde
 });
 
 // ---------------------------------------------------------------------------
+// The check's launcher (git ceiling) session-start row (12.2 f; end gate round 2, R2-1)
+
+test('12.2 f: the launcher session-start row needs the routing block from the copied skill, the hand-off folder line, exit 0 and no systemMessage; it fails when the block is missing', () => {
+  const skill = fs.readFileSync(path.join(REPO_TOP, 'src', 'core', 'skills', 'model-routing', 'SKILL.md'), 'utf8');
+  const block = CBH.routingBlockOf(skill);
+  assert.ok(block.length > 100 && !block.includes('routing-block'), 'the block between the markers');
+  const ctx = 'Hand-off folder for this session: /x/handoff\nHand-off note name for this session: n.md\n\nIf your own rules file already sets model and effort rules, yours win.\n' + block;
+  const hook = (c, extra = {}) => ({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: c }, ...extra });
+  assert.equal(CBH.seamSessionStartOk({ status: 0, hook: hook(ctx), block }), true, 'all present');
+  assert.equal(CBH.seamSessionStartOk({ status: 0, hook: hook(ctx.replace(block, '')), block }), false, 'the block missing');
+  assert.equal(CBH.seamSessionStartOk({ status: 0, hook: hook(ctx.replace(block, block.slice(0, -20))), block }), false, 'the block cut short');
+  assert.equal(CBH.seamSessionStartOk({ status: 0, hook: hook(ctx.replace('Hand-off folder for this session: ', '')), block }), false, 'no folder line');
+  assert.equal(CBH.seamSessionStartOk({ status: 0, hook: hook(ctx, { systemMessage: 'x' }), block }), false, 'a systemMessage');
+  assert.equal(CBH.seamSessionStartOk({ status: 1, hook: hook(ctx), block }), false, 'a non-zero exit');
+  assert.equal(CBH.seamSessionStartOk({ status: 0, hook: null, block }), false, 'no output');
+  assert.equal(CBH.seamSessionStartOk({ status: 0, hook: hook(ctx), block: '' }), false, 'an empty block never counts as found');
+  assert.equal(CBH.routingBlockOf('no markers'), '');
+  assert.equal(CBH.routingBlockOf('<!-- routing-block:start -->\nrules with no end marker\n'), '', 'no end marker');
+  assert.equal(CBH.routingBlockOf('rules\n<!-- routing-block:end -->'), '', 'no start marker');
+  assert.equal(CBH.routingBlockOf('<!-- routing-block:start -->\n  the rules  \n<!-- routing-block:end -->'), 'the rules');
+  assert.equal(CBH.routingBlockOf('<!-- routing-block:end -->x<!-- routing-block:start -->'), '');
+});
+
+// ---------------------------------------------------------------------------
 // Rendering (12.2 b)
 
 test('12.2 b: --render run twice gives a byte-identical docs/install.md, and the file on disk equals a fresh render', () => {

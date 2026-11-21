@@ -584,19 +584,25 @@ test('13.1 (end gate round 1, review F-4): the allowed slug passes only on githu
     `https://codeberg.org/${SLUG}`,
     `https://gist.github.com/${SLUG}`,
     `https://raw.githubusercontent.com/${SLUG}/main/x`,
+    // The colon (scp-like) form: not an allowed host since end gate round 2 (N-5); with a user
+    // part it trips the email rule anyway, so it could never pass the public layer.
+    `${['git', 'github.com'].join('@')}:${SLUG}.git`,
+    `github.com:${SLUG}`,
   ];
   const files = Object.fromEntries(others.map((u, i) => [`h${i}.md`, `follow ${u}\n`]));
-  files['ok.md'] = `${codeHostUrl(SLUG_OWNER, 'zqrepo')}\nhttps://www.${['git', 'hub'].join('')}.com/${SLUG}\n`;
+  // Passing: the plain address, with www., and with the host in mixed case (both layers fold
+  // the host's case; end gate round 2, N-3).
+  files['ok.md'] = `${codeHostUrl(SLUG_OWNER, 'zqrepo')}\nhttps://www.${['git', 'hub'].join('')}.com/${SLUG}\nhttps://${['Git', 'Hub'].join('')}.com/${SLUG}\nhttps://WWW.${['GIT', 'HUB'].join('')}.COM/${SLUG}.git\n`;
   const { repo, deny } = slugRepo(files);
   const res = scan(repo, ['--private'], { SCRUB_DENYLIST: deny });
   assert.strictEqual(res.code, 1);
   others.forEach((u, i) => {
-    const host = u.split('/')[2];
+    const host = u.split('/')[2] || u.split(':')[0];
     assert.ok(hasHit(res, `h${i}.md`, 'host-handle'), `public layer, ${host}\n${res.out}`);
     assert.ok(res.lines.includes(`h${i}.md:1 private-term-1`), `private layer, ${host}\n${res.out}`);
   });
-  assert.deepStrictEqual(hitsFor(res, 'ok.md'), [], 'github.com, with and without www, passes');
-  assert.deepStrictEqual(REAL_RULES.host_handle.install_slug_hosts, ['github.com/', 'github.com:']);
+  assert.deepStrictEqual(hitsFor(res, 'ok.md'), [], 'github.com, with and without www, in any case, passes');
+  assert.deepStrictEqual(REAL_RULES.host_handle.install_slug_hosts, ['github.com/']);
 });
 
 test('13.1 private layer through scanContent (the egress scan path): the same allowed places and the same failures', async () => {

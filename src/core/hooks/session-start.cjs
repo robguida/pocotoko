@@ -265,15 +265,15 @@ function handleSessionStart(input, ctx) {
   }
 
   let rules = '';
-  // 6.11 h: the git check's home skip uses the account's own home, never HOME or USERPROFILE.
-  const accountHome = ctx.accountHome || M.accountHomeDir();
-  const where = { projectDir: env.CLAUDE_PROJECT_DIR, cwd, home, accountHome, gitCeiling };
+  const where = { projectDir: env.CLAUDE_PROJECT_DIR, cwd, home, gitCeiling };
   if (opts.routing_rules_at_start && !userRulesHoldBlock(env, home, platform, where)) {
     const skillFile = routingSkillFile(mode, env, home, platform);
     // 6.11 h (MUST): a skill copy taken from the config folder must not sit in the project,
-    // or anywhere in a git work tree.
+    // or anywhere in a git work tree. The git check's home skip uses the account's own home,
+    // never HOME or USERPROFILE, looked up only here; no home found: nothing is skipped.
     const fromConfig = mode.mode === 'copy' && !mode.sourceFolder;
-    const refusal = fromConfig ? configFileRefusal(skillFile, { ...where, platform }) : null;
+    const accountHome = fromConfig ? (Object.prototype.hasOwnProperty.call(ctx, 'accountHome') ? ctx.accountHome : M.accountHomeDir()) : null;
+    const refusal = fromConfig ? configFileRefusal(skillFile, { ...where, accountHome, platform }) : null;
     const r = refusal ? { refusal } : readText(skillFile, LIMITS.SKILL_MAX_BYTES);
     if (r.refusal === 'project') notices.push(LINES.RULES_IN_PROJECT);
     else if (r.refusal === 'git') notices.push(LINES.RULES_IN_GIT);

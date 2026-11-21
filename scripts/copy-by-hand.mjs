@@ -157,8 +157,7 @@ function fireThroughSettings(run, env, values, shells, shellName, log) {
       // the copied skill sits in that work tree below the account's own home, so it is not
       // read (6.11 h): the git-repo routing line comes instead of the block. The launcher run
       // below (a git ceiling at the run folder) is where the block is seen.
-      const routing = fs.readFileSync(path.join(run.L.config, 'skills', 'model-routing', 'SKILL.md'), 'utf8');
-      const block = routing.slice(routing.indexOf('-->', routing.indexOf('routing-block:start')) + 3, routing.indexOf('<!-- routing-block:end')).trim();
+      const block = routingBlockOf(fs.readFileSync(path.join(run.L.config, 'skills', 'model-routing', 'SKILL.md'), 'utf8'));
       const msg = String((j && j.systemMessage) || '');
       ok = ok && j && /your Claude config folder is inside a git repo/.test(msg)
         && msg.includes('the model-routing skill file is inside a git repo, so it was not read.')
@@ -185,6 +184,29 @@ function fireThroughSettings(run, env, values, shells, shellName, log) {
   return out;
 }
 
+/** The routing block of a model-routing skill text: what lies between its two markers, trimmed ('' when absent). */
+export function routingBlockOf(skillText) {
+  const t = String(skillText || '');
+  const a = t.indexOf('routing-block:start');
+  const b = t.indexOf('<!-- routing-block:end');
+  if (a < 0 || b < 0) return '';
+  const start = t.indexOf('-->', a);
+  if (start < 0) return '';
+  return t.slice(start + 3, b).trim(); // markers out of order: an empty slice
+}
+
+/**
+ * The launcher (git ceiling) session-start run is right only when it exits 0, sends no
+ * systemMessage, and its context holds both the hand-off folder line and the routing block
+ * read from the copied skill (12.2 f). An empty block never counts as found.
+ */
+export function seamSessionStartOk({ status, hook, block }) {
+  const j = hook && typeof hook === 'object' ? hook : {};
+  const ctx = String((j.hookSpecificOutput || {}).additionalContext || '');
+  return status === 0 && !j.systemMessage && ctx.includes('Hand-off folder for this session: ')
+    && typeof block === 'string' && block !== '' && ctx.includes(block);
+}
+
 /** Node run only: the hooks through the test launcher with a git ceiling, so they really write (then uninstall must remove it all). */
 function fireWithCeiling(run, env, values) {
   const out = [];
@@ -194,8 +216,8 @@ function fireWithCeiling(run, env, values) {
   const hookEnv = { ...env, CLAUDE_PROJECT_DIR: run.project };
   const ss = D.fireWithCeiling(path.join(kit, 'hooks', 'session-start.cjs'), [], run.dir, { env: hookEnv, cwd: run.project, input: D.sessionStartInput(run.project, transcript) });
   const j = D.parseHookJson(ss.stdout) || {};
-  const ctx = String((j.hookSpecificOutput || {}).additionalContext || '');
-  const okSs = ss.status === 0 && ctx.includes('Hand-off folder for this session: ') && !j.systemMessage;
+  const block = routingBlockOf(fs.readFileSync(path.join(run.L.config, 'skills', 'model-routing', 'SKILL.md'), 'utf8'));
+  const okSs = seamSessionStartOk({ status: ss.status, hook: j, block });
   out.push({ id: 'seam SessionStart', status: okSs ? 'done' : 'failed', reason: 'exit ' + ss.status + (okSs ? ', hand-off folder line and routing block' : ' | ' + D.short(ss.stdout + ss.stderr)) });
   const pr = D.fireWithCeiling(path.join(kit, 'hooks', 'meter.cjs'), [], run.dir, { env: hookEnv, cwd: run.project, input: D.promptInput(run.project, transcript) });
   const pj = D.parseHookJson(pr.stdout) || {};

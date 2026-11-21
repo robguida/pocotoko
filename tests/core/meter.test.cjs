@@ -611,9 +611,99 @@ test('6.6 (end gate round 1, N-1): a handoff_dir whose written form is inside th
   const inProj = H.mk(b.proj, 'notes');
   const link = H.dirLink(inProj, path.join(b.base, 'outside-link'));
   assert.deepEqual(M.resolveHandoffDir(link, { projectDir: b.proj, cwd: cwdDir, configDir: b.config, gitCeiling: b.base }), { refused: true });
-  // A good folder is still used.
+  // The project named through a link (as projectDir, and as cwd), the value a folder inside the
+  // project named by its REAL path: the project's real path fences it (end gate round 2, N-1).
+  const realInside = H.mk(b.proj, 'real-notes');
+  assert.deepEqual(M.resolveHandoffDir(realInside, { projectDir: projLink, cwd: '', gitCeiling: b.base }), { refused: true }, 'projectDir is a link');
+  assert.deepEqual(M.resolveHandoffDir(realInside, { projectDir: '', cwd: projLink, gitCeiling: b.base }), { refused: true }, 'cwd is a link');
+  // A good folder is still used, also when reached through a local link from outside.
   const good = H.mk(b.base, 'good notes');
   assert.deepEqual(M.resolveHandoffDir(good, { projectDir: b.proj, cwd: cwdDir, configDir: b.config, gitCeiling: b.base }), { dir: good });
+  const goodLink = H.dirLink(good, path.join(b.base, 'good-link'));
+  assert.deepEqual(M.resolveHandoffDir(goodLink, { projectDir: b.proj, cwd: cwdDir, configDir: b.config, gitCeiling: b.base }), { dir: good }, 'a local link is followed');
+  assert.equal(M.linkToNetwork(goodLink, process.platform), false, 'a real local link is not a network link');
+});
+
+// A fake file system for the link walk: `links` maps a path to its stored link target; every
+// other path is a plain folder; `errors` maps a path to an lstat error code. Nothing real is
+// touched, so a network target is only ever a string.
+function fakeFs({ links = {}, errors = {}, readlinkErrors = [] } = {}) {
+  const calls = { lstat: [], readlink: [], realpath: [] };
+  const key = (p) => p.toLowerCase();
+  const L = Object.fromEntries(Object.entries(links).map(([k, v]) => [key(k), v]));
+  const E = Object.fromEntries(Object.entries(errors).map(([k, v]) => [key(k), v]));
+  const RE = readlinkErrors.map(key);
+  return {
+    calls,
+    lstat: (p) => {
+      calls.lstat.push(p);
+      if (E[key(p)]) throw Object.assign(new Error(E[key(p)]), { code: E[key(p)] });
+      return { isSymbolicLink: () => Object.prototype.hasOwnProperty.call(L, key(p)) };
+    },
+    readlink: (p) => {
+      calls.readlink.push(p);
+      if (RE.includes(key(p))) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      return L[key(p)];
+    },
+    realpath: (p) => { calls.realpath.push(p); throw Object.assign(new Error('stop here'), { code: 'ENOENT' }); },
+  };
+}
+
+test('6.6 (end gate round 2, R2-2): on Windows a link anywhere in handoff_dir whose stored target is a network or device path is refused before anything is resolved: a short 8.3 name, a link in another repo, a chain of links (fake file system, pure strings, every OS)', () => {
+  const NET = BS + BS + NET_HOST + BS + 'share';
+  const resolve = (value, f) => M.resolveHandoffDir(value, { projectDir: 'C:' + BS + 'Work' + BS + 'Project Folder Long', cwd: '', configDir: null, platform: 'win32', _realpath: f.realpath, _lstat: f.lstat, _readlink: f.readlink });
+  for (const [label, target] of [
+    ['UNC, backslashes', NET],
+    ['UNC, forward slashes', '//' + NET_HOST + '/share'],
+    ['long-path UNC', BS + BS + '?' + BS + 'UNC' + BS + NET_HOST + BS + 'share'],
+    ['NT form', BS + '??' + BS + 'UNC' + BS + NET_HOST + BS + 'share'],
+    ['NT form without the prefix', 'UNC' + BS + NET_HOST + BS + 'share'],
+    ['device form', BS + BS + '.' + BS + 'pipe' + BS + 'x'],
+  ]) {
+    // The 8.3 name of the project: the text fence cannot see it is the project.
+    const value = 'C:' + BS + 'Work' + BS + 'PROJEC~1' + BS + 'link';
+    const f = fakeFs({ links: { [value]: target } });
+    assert.deepEqual(resolve(value, f), { refused: true }, label);
+    assert.deepEqual(f.calls.realpath, [], label + ': nothing resolved');
+    assert.ok(f.calls.readlink.length === 1, label + ': the link target was read, not followed');
+  }
+  // A link in the middle of the value, inside some other repo on the disk.
+  const mid = fakeFs({ links: { ['D:' + BS + 'repo' + BS + 'share-link']: NET } });
+  assert.deepEqual(resolve('D:' + BS + 'repo' + BS + 'share-link' + BS + 'notes', mid), { refused: true }, 'a link in the middle');
+  assert.deepEqual(mid.calls.realpath, []);
+  // A chain: a local link to a folder that is itself a link to the network.
+  const chain = fakeFs({ links: { ['D:' + BS + 'a']: 'D:' + BS + 'b', ['D:' + BS + 'b']: NET } });
+  assert.deepEqual(resolve('D:' + BS + 'a' + BS + 'notes', chain), { refused: true }, 'a chain of links');
+  assert.deepEqual(chain.calls.realpath, []);
+  // A relative stored target is read against the link's own folder.
+  // (D:\x\w\up holds ..\y, which is D:\x\y, a link to the network; D:\y is a plain folder.)
+  const rel = fakeFs({ links: { ['D:' + BS + 'x' + BS + 'w' + BS + 'up']: '..' + BS + 'y', ['D:' + BS + 'x' + BS + 'y']: NET } });
+  assert.deepEqual(resolve('D:' + BS + 'x' + BS + 'w' + BS + 'up', rel), { refused: true }, 'a relative target');
+  assert.deepEqual(rel.calls.realpath, [], 'a relative target: nothing resolved');
+  // A link loop fails closed.
+  const loop = fakeFs({ links: { ['D:' + BS + 'loop']: 'D:' + BS + 'loop' } });
+  assert.deepEqual(resolve('D:' + BS + 'loop' + BS + 'n', loop), { refused: true }, 'a loop');
+  assert.deepEqual(loop.calls.realpath, []);
+  // Errors fail closed; a part that does not exist ends the walk (the real-path step refuses it).
+  const denied = fakeFs({ errors: { ['D:' + BS + 'locked']: 'EACCES' } });
+  assert.deepEqual(resolve('D:' + BS + 'locked' + BS + 'n', denied), { refused: true }, 'lstat EACCES');
+  assert.deepEqual(denied.calls.realpath, [], 'lstat EACCES: nothing resolved');
+  const unreadable = fakeFs({ links: { ['D:' + BS + 'l']: 'D:' + BS + 'z' }, readlinkErrors: ['D:' + BS + 'l'] });
+  assert.deepEqual(resolve('D:' + BS + 'l' + BS + 'n', unreadable), { refused: true }, 'readlink error');
+  assert.deepEqual(unreadable.calls.realpath, []);
+  const missing = fakeFs({ errors: { ['D:' + BS + 'gone']: 'ENOENT' } });
+  assert.deepEqual(resolve('D:' + BS + 'gone' + BS + 'n', missing), { refused: true });
+  assert.equal(missing.calls.realpath.length, 1, 'not found: the walk ends and the real-path step refuses it');
+  // A local link: the walk passes it and the real-path step runs.
+  const local = fakeFs({ links: { ['D:' + BS + 'notes-link']: 'E:' + BS + 'notes' } });
+  assert.deepEqual(resolve('D:' + BS + 'notes-link', local), { refused: true });
+  assert.equal(local.calls.realpath.length, 1, 'a local link: resolved as before');
+  assert.ok(local.calls.lstat.some((p) => p.toLowerCase() === ('E:' + BS + 'notes').toLowerCase()), 'its target was walked too');
+  // macOS and Linux: no walk (a leading // is an ordinary path there).
+  const posix = fakeFs({ links: { '/x/l': NET } });
+  assert.equal(M.linkToNetwork('/x/l', 'linux', posix.lstat, posix.readlink), false);
+  assert.equal(M.linkToNetwork('/x/l', 'darwin', posix.lstat, posix.readlink), false);
+  assert.deepEqual(posix.calls.lstat, [], 'no walk on POSIX');
 });
 
 test('6.6 / SR-C6 (L-3, child process, Windows): the long-path forms of a real local folder (\\\\?\\ and //?/) are refused, default used, exit 0 (local only, no network)', { skip: !IS_WIN && 'Windows path forms only: on macOS and Linux a leading // is an ordinary path (tested as strings above)' }, () => {
