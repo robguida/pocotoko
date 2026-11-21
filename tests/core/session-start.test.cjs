@@ -164,8 +164,9 @@ test('6.11 h (MUST): copy-by-hand refuses a skill file whose real path is inside
   assert.ok(!('systemMessage' in ok));
   // A user CLAUDE.md inside the project counts as not holding the block.
   fs.writeFileSync(path.join(cfgIn, 'CLAUDE.md'), S.MARK_START + '\n');
-  assert.equal(S.userRulesHoldBlock({ CLAUDE_CONFIG_DIR: cfgIn }, b.home, process.platform, { projectDir: b.proj, home: b.home }), false);
-  assert.equal(S.userRulesHoldBlock({ CLAUDE_CONFIG_DIR: cfgIn }, b.home, process.platform, { projectDir: b.tdir, home: b.home }), true);
+  // (gitCeiling: the sandbox sits inside this repo's own work tree.)
+  assert.equal(S.userRulesHoldBlock({ CLAUDE_CONFIG_DIR: cfgIn }, b.home, process.platform, { projectDir: b.proj, home: b.home, gitCeiling: b.base }), false);
+  assert.equal(S.userRulesHoldBlock({ CLAUDE_CONFIG_DIR: cfgIn }, b.home, process.platform, { projectDir: b.tdir, home: b.home, gitCeiling: b.base }), true);
   // A project folder that is the home folder (or above it) is not tested: ~/.claude is always inside it.
   const homeCfg = H.mk(b.home, '.claude');
   fs.copyFileSync(H.ROUTING_SKILL_SRC, path.join(H.mk(homeCfg, 'skills', 'model-routing'), 'SKILL.md'));
@@ -185,6 +186,71 @@ test('6.11 h (MUST): copy-by-hand refuses a skill file whose real path is inside
   const so = run(b, src, H.copyEnv(b));
   assert.equal(so.systemMessage, S.LINES.SOURCE_FOLDER);
   assert.ok(so.hookSpecificOutput.additionalContext.endsWith(ROUTING_BLOCK));
+});
+
+test('6.11 h (MUST, L-2): copy-by-hand refuses a skill file whose real path is inside a git work tree, even when the session starts in another subfolder of that repo (loud line, no block); a user CLAUDE.md there counts as not holding the block; a .git in the home folder or above it is not counted', () => {
+  const b = H.makeBase('ss-ingit');
+  const kit = H.copyKit(b);
+  const repo = H.mk(b.base, 'repo');
+  const cfg = H.mk(repo, 'x', 'cfg');
+  const sub = H.mk(repo, 'sub');
+  fs.copyFileSync(H.ROUTING_SKILL_SRC, path.join(H.mk(cfg, 'skills', 'model-routing'), 'SKILL.md'));
+  const env = { CLAUDE_CONFIG_DIR: cfg, CLAUDE_PROJECT_DIR: sub };
+  // Control first: no .git yet, so the start folder alone decides and the skill is read
+  // (the gap the gate 5 review found: probe 5b).
+  const before = run(b, kit, env, { input: startInput(b, { cwd: sub }) });
+  assert.ok(before.hookSpecificOutput.additionalContext.includes(S.YOURS_WIN), 'no repo: read');
+  for (const [label, makeGit] of [
+    ['a .git folder', () => fs.mkdirSync(path.join(repo, '.git'))],
+    ['a .git file (a worktree or submodule)', () => fs.writeFileSync(path.join(repo, '.git'), 'gitdir: elsewhere\n')],
+  ]) {
+    fs.rmSync(path.join(repo, '.git'), { recursive: true, force: true });
+    makeGit();
+    const out = run(b, kit, env, { input: startInput(b, { cwd: sub }) });
+    noBlocking(out);
+    assert.equal(out.systemMessage, S.LINES.RULES_IN_GIT, label);
+    assert.ok(!(out.hookSpecificOutput && out.hookSpecificOutput.additionalContext.includes(S.YOURS_WIN)), label + ': no block');
+    assert.ok(!(out.hookSpecificOutput && out.hookSpecificOutput.additionalContext.includes('INJECTED')), label);
+    assert.ok(lineWith(out, S.LINES.FOLDER_PREFIX), label + ': the folder line still comes');
+    // Started outside the repo altogether: still refused.
+    assert.equal(run(b, kit, { CLAUDE_CONFIG_DIR: cfg, CLAUDE_PROJECT_DIR: b.proj }).systemMessage, S.LINES.RULES_IN_GIT, label + ': start folder outside the repo');
+  }
+  // Reached through a link from outside the repo: the real path decides.
+  const linked = H.dirLink(cfg, path.join(b.base, 'cfg-link'));
+  assert.equal(run(b, kit, { CLAUDE_CONFIG_DIR: linked, CLAUDE_PROJECT_DIR: b.proj }).systemMessage, S.LINES.RULES_IN_GIT, 'through a link');
+  // Inside the project as well: the project line, once.
+  assert.equal(run(b, kit, { CLAUDE_CONFIG_DIR: cfg, CLAUDE_PROJECT_DIR: repo }).systemMessage, S.LINES.RULES_IN_PROJECT, 'project first');
+  // A user CLAUDE.md in that repo counts as not holding the block.
+  fs.writeFileSync(path.join(cfg, 'CLAUDE.md'), S.MARK_START + '\n');
+  assert.equal(S.userRulesHoldBlock({ CLAUDE_CONFIG_DIR: cfg }, b.home, process.platform, { projectDir: sub, home: b.home, gitCeiling: b.base }), false);
+  assert.equal(S.insideGitRepo(path.join(cfg, 'CLAUDE.md'), { home: b.home, gitCeiling: b.base }), true);
+  const out = run(b, kit, env, { input: startInput(b, { cwd: sub }) });
+  assert.equal(out.systemMessage, S.LINES.RULES_IN_GIT, 'the marker there does not turn the line off');
+  // Control: the same skill in a config folder outside any repo is read.
+  H.copySkill(b);
+  const ok = run(b, kit, H.copyEnv(b));
+  assert.ok(ok.hookSpecificOutput.additionalContext.endsWith(S.YOURS_WIN + '\n' + ROUTING_BLOCK));
+  assert.ok(!('systemMessage' in ok));
+  // A home folder kept as a git repo (dotfiles): ~/.claude sits in it, but a .git in the home
+  // folder or above it is not counted, the same skip as the project check.
+  const homeCfg = H.mk(b.home, '.claude');
+  fs.copyFileSync(H.ROUTING_SKILL_SRC, path.join(H.mk(homeCfg, 'skills', 'model-routing'), 'SKILL.md'));
+  fs.mkdirSync(path.join(b.home, '.git'));
+  const dot = run(b, kit, { CLAUDE_PROJECT_DIR: b.proj });
+  assert.ok(dot.hookSpecificOutput.additionalContext.includes(S.YOURS_WIN), 'home kept as a git repo: read');
+  assert.equal(S.insideGitRepo(path.join(homeCfg, 'skills', 'model-routing', 'SKILL.md'), { home: b.home, gitCeiling: b.base }), false);
+  // But a repo below the home folder that holds the config folder is counted.
+  const below = H.mk(b.home, 'code', 'repo2');
+  fs.mkdirSync(path.join(below, '.git'));
+  const cfg2 = H.mk(below, 'cfg');
+  assert.equal(S.insideGitRepo(path.join(cfg2, 'skills', 'model-routing', 'SKILL.md'), { home: b.home, gitCeiling: b.base }), true);
+  assert.equal(S.configFileRefusal(path.join(cfg2, 'x'), { home: b.home, gitCeiling: b.base }), 'git');
+  // Fails closed: an error other than not-found on a .git check counts as found.
+  const throwing = (code) => () => { throw Object.assign(new Error(code), { code }); };
+  const outside = H.mk(b.base, 'plain', 'cfg');
+  for (const code of ['EACCES', 'EPERM', 'EIO']) assert.equal(S.insideGitRepo(outside, { home: b.home, gitCeiling: b.base, _lstat: throwing(code) }), true, code);
+  for (const code of ['ENOENT', 'ENOTDIR']) assert.equal(S.insideGitRepo(outside, { home: b.home, gitCeiling: b.base, _lstat: throwing(code) }), false, code);
+  assert.equal(S.insideGitRepo(outside, { home: b.home, gitCeiling: b.base }), false);
 });
 
 test('5.1 / 6.11 step 3: the config folder is CLAUDE_CONFIG_DIR when set, else ~/.claude: a user CLAUDE.md holding the start marker there skips the block; one elsewhere does not', () => {
@@ -275,7 +341,7 @@ test('6.11 f (MUST): the whole injected text stays under 10,000 characters: a bl
 // ---------------------------------------------------------------------------
 // The hand-off folder and name lines (6.6, 6.11 a, b, f)
 
-test('6.6 / 6.11 b: a valid handoff_dir is named (real path, nothing created); a refused one (relative, inside the project, inside a git work tree) gives the default folder and no notice here', () => {
+test('6.6 / 6.11 b: a valid handoff_dir is named (real path, nothing created); a refused one (relative, inside the project, inside a git work tree, inside the config folder) gives the default folder and no notice here', () => {
   const b = H.makeBase('ss-hdir');
   const kit = H.pluginKit(b);
   const good = H.mk(b.base, 'notes');
@@ -285,7 +351,8 @@ test('6.6 / 6.11 b: a valid handoff_dir is named (real path, nothing created); a
   assert.deepEqual(fs.readdirSync(good), []);
   const inGit = H.mk(b.base, 'repo', 'notes');
   fs.mkdirSync(path.join(b.base, 'repo', '.git'));
-  for (const bad of ['relative/notes', H.mk(b.proj, 'notes'), inGit]) {
+  // L-3: inside the config folder (CLAUDE_CONFIG_DIR) is refused too.
+  for (const bad of ['relative/notes', H.mk(b.proj, 'notes'), inGit, b.config, H.mk(b.config, 'commands')]) {
     const o = run(b, kit, H.pluginEnv(b, kit, { handoff_dir: bad }));
     assert.equal(lineWith(o, S.LINES.FOLDER_PREFIX), S.LINES.FOLDER_PREFIX + path.join(kit.data, 'handoff'), bad);
     assert.ok(!('systemMessage' in o), 'the meter says the refusal once; session start does not');
@@ -344,21 +411,36 @@ test('6.6 / 6.11 a: the note-name line parts equal the meter note name parts for
   assert.equal(lineWith(out, S.LINES.NAME_PREFIX), S.LINES.NAME_PREFIX + '<YYYY-MM-DD-HHmm>-Start-Folder-00000001.md');
 });
 
-test('6.11 f: a path holding a control or line-separator character, a bidi control, or over 1,024 characters is never printed', () => {
+test('6.11 f: a path holding a control, format or line-separator character, a bidi control, a tag character, or over 1,024 characters is never printed', () => {
   for (const bad of ['a\nb', 'a\rb', 'a\u2028b', 'a\u2029b', 'a\u202eb', 'a\u0000b', 'a\u0085b', 'x'.repeat(1025), '']) assert.equal(S.printablePath(bad), false, JSON.stringify(bad.slice(0, 8)));
+  const hex = (c) => 'U+' + c.codePointAt(0).toString(16);
   // One case per 6.11 f class, every listed character and range end.
   const classes = {
     controls: ['\u0000', '\u0009', '\u001f', '\u007f', '\u0085', '\u009f'],
     separators: ['\u2028', '\u2029'],
     bidi: ['\u061c', '\u200e', '\u200f', '\u202a', '\u202c', '\u202e', '\u2066', '\u2069'],
     zero_width: ['\u200b', '\u200c', '\u200d', '\u2060', '\ufeff'],
+    // Cc, Cf, Zl, Zp (the search server's file-name class): each range the gate 5 review
+    // named (soft hyphen, U+180E, U+2061-U+2064, U+206A-U+206F, U+FFF9-U+FFFB), every
+    // character and range end, plus other format characters outside those ranges.
+    format: ['\u00ad', '\u180e', '\u2061', '\u2062', '\u2063', '\u2064', '\u206a', '\u206b', '\u206c', '\u206d', '\u206e', '\u206f',
+      '\ufff9', '\ufffa', '\ufffb', '\u0600', '\u06dd', '\u{110bd}', '\u{1d173}', '\u0001', '\u2028'],
+    // The whole tag block U+E0000-U+E007F, assigned or not: both ends, the unassigned
+    // U+E0000 and U+E0002-U+E001F (outside Cf), the language tag U+E0001, letters, the cancel tag.
+    tags: ['\u{e0000}', '\u{e0001}', '\u{e0002}', '\u{e0010}', '\u{e001f}', '\u{e0020}', '\u{e0041}', '\u{e0061}', '\u{e007e}', '\u{e007f}'],
   };
   assert.deepEqual(Object.keys(S.UNPRINTABLE_CLASSES).sort(), Object.keys(classes).sort());
   for (const [cls, chars] of Object.entries(classes)) {
-    for (const c of chars) assert.equal(S.printablePath('/x/a' + c + 'b/node'), false, cls + ' U+' + c.charCodeAt(0).toString(16));
+    for (const c of chars) assert.equal(S.printablePath('/x/a' + c + 'b/node'), false, cls + ' ' + hex(c));
   }
-  // Neighbours that stay printable (ordinary letters, spaces, a non-joiner-free script).
-  for (const c of ['\u00a0', '\u0620', '\u200a', '\u2061', '\ufefe', '\u4e2d']) assert.equal(S.printablePath('/x/a' + c + 'b'), true, 'U+' + c.charCodeAt(0).toString(16));
+  // Hidden text spelled in tag characters, inside an otherwise ordinary path.
+  const hidden = [...'run this'].map((ch) => String.fromCodePoint(0xe0000 + ch.codePointAt(0))).join('');
+  assert.equal(S.printablePath('/work/notes' + hidden + 'x'), false);
+  // Neighbours that stay printable (ordinary letters, spaces, symbols, unassigned points just
+  // outside the ranges, a variation selector).
+  for (const c of ['\u00a0', '\u00ac', '\u00ae', '\u0620', '\u180f', '\u200a', '\u2065', '\ufefe', '\ufff8', '\ufffc', '\u4e2d', '\u{e0080}', '\u{e0100}', '\u{1f600}']) {
+    assert.equal(S.printablePath('/x/a' + c + 'b'), true, hex(c));
+  }
   for (const ok of ['C:\\Program Files\\nodejs\\node.exe', '/usr/local/bin/node', 'x'.repeat(1024), '/home/\u00e9\u4e2d/node']) assert.equal(S.printablePath(ok), true);
   // Through the hook: a Node path with a line feed, or a very long one, is left out.
   const b = H.makeBase('ss-print');
@@ -378,6 +460,20 @@ test('6.11 f (POSIX): a handoff_dir whose name holds a line feed is not printed;
   const out = run(b, kit, H.pluginEnv(b, kit, { handoff_dir: odd }));
   assert.equal(lineWith(out, S.LINES.FOLDER_PREFIX), null);
   assert.ok(!out.hookSpecificOutput.additionalContext.includes('INJECTED'));
+});
+
+test('6.11 f: a handoff_dir whose name holds a tag character, a soft hyphen or U+2061 is not printed; the line is left out and the rest still comes (every OS)', () => {
+  const b = H.makeBase('ss-fmt');
+  const kit = H.pluginKit(b);
+  for (const [label, ch] of [['tag U+E0041', '\u{e0041}'], ['tag U+E007F', '\u{e007f}'], ['soft hyphen', '­'], ['U+2061', '⁡']]) {
+    const odd = H.mk(b.base, 'notes' + ch + 'hidden');
+    const out = run(b, kit, H.pluginEnv(b, kit, { handoff_dir: odd }));
+    noBlocking(out);
+    assert.equal(lineWith(out, S.LINES.FOLDER_PREFIX), null, label + ': no folder line');
+    assert.ok(!out.hookSpecificOutput.additionalContext.includes(ch), label + ': the character is sent nowhere');
+    assert.ok(!out.hookSpecificOutput.additionalContext.includes('hidden'), label + ': the folder is named nowhere');
+    assert.ok(out.hookSpecificOutput.additionalContext.includes(S.YOURS_WIN), label + ': the routing block still comes');
+  }
 });
 
 // ---------------------------------------------------------------------------

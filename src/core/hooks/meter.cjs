@@ -66,7 +66,7 @@ const LINES = Object.freeze({
   // 6.8: the loud real-format notice, word for word.
   FORMAT: "chat-length meter cannot read this chat's format; it is off for this session",
   CONFIG_INVALID: 'chat-length meter: the meter options are not valid, so the built-in defaults are used for this session.',
-  HANDOFF_DIR_REFUSED: 'chat-length meter: the hand-off folder option was refused (it must be an absolute path to an existing folder outside this project and outside any git repo), so the default hand-off folder is used.',
+  HANDOFF_DIR_REFUSED: 'chat-length meter: the hand-off folder option was refused (it must be an absolute path to an existing folder, not a network path, outside this project, outside any git repo and outside the Claude config folder), so the default hand-off folder is used.',
   PLUGIN_DATA_IGNORED: 'chat-length meter: CLAUDE_PLUGIN_DATA is set, but this copy runs outside the plugin cache, so the variable was ignored and the kit folder is used.',
   NOTE_CLASH: 'chat-length meter: no new hand-off note file could be created (the names up to -9 are taken), so no note was requested.',
   NOTE_FAILED: 'chat-length meter: the hand-off note file could not be created, so no note was requested.',
@@ -76,12 +76,18 @@ const LINES = Object.freeze({
 // 6.11 f, the exact set never printed in a path (used by the meter, 6.6 a, and by
 // session-start.cjs): C0 and C1 controls; line and paragraph separators; bidi controls
 // (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069); zero-width and invisible
-// characters (U+200B-U+200D, U+2060, U+FEFF).
+// characters (U+200B-U+200D, U+2060, U+FEFF); every other control, format, line-separator
+// and paragraph-separator character (Unicode classes Cc, Cf, Zl, Zp: the search server's
+// own file-name class, so both plugins agree; it holds, for example, the soft hyphen
+// U+00AD, U+180E, U+2061-U+2064, U+206A-U+206F and U+FFF9-U+FFFB); and the whole tag block
+// U+E0000-U+E007F, assigned or not (text an AI model reads but a screen does not show).
 const UNPRINTABLE_CLASSES = Object.freeze({
   controls: '\\u0000-\\u001f\\u007f-\\u009f',
   separators: '\\u2028\\u2029',
   bidi: '\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069',
   zero_width: '\\u200b-\\u200d\\u2060\\ufeff',
+  format: '\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}',
+  tags: '\\u{e0000}-\\u{e007f}',
 });
 const UNPRINTABLE_RE = new RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
 
@@ -918,20 +924,34 @@ function precreateNote(dir, expectedDir, base, platform = process.platform) {
 }
 
 /**
- * The `handoff_dir` option (6.6, SR-C6): absolute, existing folder, resolved to its real
- * path once. Refused when it is inside the current project (CLAUDE_PROJECT_DIR or the hook
- * input's cwd) or inside any git work tree. Returns { dir } | { refused: true }.
+ * True for a Windows path that starts with two slashes of either kind: a network path
+ * (`\\host\share`, `//host/share`) or a device or long-path form (`\\.\`, `\\?\`). Pure
+ * string test; nothing on disk or on the network is touched (6.6).
  */
-function resolveHandoffDir(value, { projectDir, cwd, platform = process.platform, gitCeiling = null }) {
+function isWindowsNetworkOrDevicePath(p, platform = process.platform) {
+  return isWindows(platform) && typeof p === 'string' && /^[\\/]{2}/.test(p);
+}
+
+/**
+ * The `handoff_dir` option (6.6, SR-C6): absolute, existing folder, resolved to its real
+ * path once. Refused when it is a Windows network or device path (tested on the string,
+ * before any file call, so no network connection is ever made), inside the config folder
+ * (configDir, a real path), inside the current project (CLAUDE_PROJECT_DIR or the hook
+ * input's cwd) or inside any git work tree. Returns { dir } | { refused: true }.
+ * _realpath: test-only seam.
+ */
+function resolveHandoffDir(value, { projectDir, cwd, configDir = null, platform = process.platform, gitCeiling = null, _realpath = fs.realpathSync.native }) {
   const s = typeof value === 'string' ? value.trim() : '';
   if (!isAbsoluteFor(s, platform)) return { refused: true };
+  if (isWindowsNetworkOrDevicePath(s, platform)) return { refused: true };
   let real;
   try {
-    real = fs.realpathSync.native(s);
+    real = _realpath(s);
     if (!fs.statSync(real).isDirectory()) return { refused: true };
   } catch (_) {
     return { refused: true };
   }
+  if (nonEmpty(configDir) && isInside(real, configDir, platform)) return { refused: true };
   for (const p of [projectDir, cwd]) {
     if (!nonEmpty(p) || !isAbsoluteFor(p, platform)) continue;
     let pr;
@@ -1045,7 +1065,7 @@ function handlePrompt(input, ctx) {
           let dir = null;
           let expected = null;
           if (nonEmpty(opts.handoff_dir)) {
-            const h = resolveHandoffDir(opts.handoff_dir, { projectDir: env.CLAUDE_PROJECT_DIR, cwd: input.cwd, platform, gitCeiling: ctx.gitCeiling || null });
+            const h = resolveHandoffDir(opts.handoff_dir, { projectDir: env.CLAUDE_PROJECT_DIR, cwd: input.cwd, configDir: configDirOf(env, home, platform), platform, gitCeiling: ctx.gitCeiling || null });
             if (h.refused) tellOnce('handoff_dir', LINES.HANDOFF_DIR_REFUSED);
             else { dir = h.dir; expected = h.dir; }
           }
@@ -1378,6 +1398,7 @@ module.exports = {
   cleanPart,
   noteBaseName,
   precreateNote,
+  isWindowsNetworkOrDevicePath,
   resolveHandoffDir,
   handlePrompt,
   statusSize,

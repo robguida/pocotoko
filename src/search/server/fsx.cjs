@@ -42,7 +42,9 @@ function isWindows(platform) {
 // the core's meter.cjs, so this is the server's own copy of the 6.11 f table and
 // cap; it MUST equal the meter's (consistency.test.cjs checks it). C0 and C1
 // controls; line and paragraph separators; bidi controls; zero-width and
-// invisible characters.
+// invisible characters; every other Cc, Cf, Zl and Zp character (the class the
+// walker and the envelope use for file names); the whole tag block
+// U+E0000-U+E007F.
 
 const PATH_MAX_CHARS = 1024;
 const UNPRINTABLE_CLASSES = Object.freeze({
@@ -50,6 +52,8 @@ const UNPRINTABLE_CLASSES = Object.freeze({
   separators: '\\u2028\\u2029',
   bidi: '\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069',
   zero_width: '\\u200b-\\u200d\\u2060\\ufeff',
+  format: '\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}',
+  tags: '\\u{e0000}-\\u{e007f}',
 });
 const UNPRINTABLE_RE = new RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
 

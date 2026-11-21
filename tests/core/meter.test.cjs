@@ -503,6 +503,94 @@ test('6.6 / SR-C6: handoff_dir is refused (default used, said once) when relativ
   assert.ok(ok.hookSpecificOutput.additionalContext.includes(path.join(good, noteFiles(good)[0])));
 });
 
+// Windows network and device path forms, built from parts (no literal host anywhere). The host
+// is under the reserved .invalid name, and no test passes these to a real file call.
+const BS = '\\';
+const NET_HOST = ['pocotoko-test', 'invalid'].join('.');
+const NET_FORMS = [
+  ['UNC, backslashes', BS + BS + NET_HOST + BS + 'share' + BS + 'notes'],
+  ['UNC, forward slashes', '//' + NET_HOST + '/share/notes'],
+  ['UNC, mixed slashes', BS + '/' + NET_HOST + '/share'],
+  ['device form', BS + BS + '.' + BS + 'C:' + BS + 'notes'],
+  ['long-path form', BS + BS + '?' + BS + 'C:' + BS + 'notes'],
+  ['long-path UNC form', BS + BS + '?' + BS + 'UNC' + BS + NET_HOST + BS + 'share'],
+];
+
+test('6.6 / SR-C6 (L-3): on Windows a handoff_dir in a network or device form (\\\\host\\share, //host/share, \\\\.\\, \\\\?\\) is refused on the string alone, before any file call; the same strings are not network paths on macOS or Linux (pure strings, every OS)', () => {
+  for (const [label, p] of NET_FORMS) {
+    assert.equal(M.isWindowsNetworkOrDevicePath(p, 'win32'), true, label);
+    assert.equal(M.isWindowsNetworkOrDevicePath(p, 'linux'), false, label + ' (linux)');
+    assert.equal(M.isWindowsNetworkOrDevicePath(p, 'darwin'), false, label + ' (darwin)');
+    const calls = [];
+    const seam = (x) => { calls.push(x); throw Object.assign(new Error('must not be called'), { code: 'EACCES' }); };
+    assert.deepEqual(M.resolveHandoffDir(p, { projectDir: '', cwd: '', configDir: null, platform: 'win32', _realpath: seam }), { refused: true }, label);
+    assert.deepEqual(M.resolveHandoffDir('  ' + p + '  ', { platform: 'win32', _realpath: seam }), { refused: true }, label + ' (padded)');
+    assert.deepEqual(calls, [], label + ': no file call was made, so no network connection');
+  }
+  for (const p of ['C:' + BS + 'notes', 'C:/notes', 'd:' + BS + 'a' + BS + BS + 'b']) assert.equal(M.isWindowsNetworkOrDevicePath(p, 'win32'), false, p);
+  // On POSIX a leading // is an ordinary absolute path: the rule does not apply and the folder
+  // check runs (here the seam says it does not exist, so it is refused as missing).
+  const calls = [];
+  const missing = (x) => { calls.push(x); throw Object.assign(new Error('missing'), { code: 'ENOENT' }); };
+  assert.deepEqual(M.resolveHandoffDir('//' + NET_HOST + '/share', { platform: 'linux', _realpath: missing }), { refused: true });
+  assert.equal(calls.length, 1, 'POSIX: the ordinary folder check ran');
+});
+
+test('6.6 / SR-C6 (L-3): a handoff_dir inside the config folder (the folder itself, a subfolder such as commands, the default ~/.claude, or a link into it) is refused, default used, said once; a sibling folder with a longer name is used (every OS)', () => {
+  const b = H.makeBase('hdir-cfg');
+  const kit = H.copyKit(b);
+  const env = H.copyEnv(b);
+  const def = path.join(kit.stateRoot, 'handoff');
+  const commands = H.mk(b.config, 'commands');
+  const deep = H.mk(b.config, 'skills', 'notes');
+  const linkIn = H.dirLink(commands, path.join(b.base, 'link-to-commands'));
+  const cases = [
+    ['the config folder', b.config, env],
+    ['config/commands', commands, env],
+    ['config/skills/notes', deep, env],
+    ['a link into the config folder', linkIn, env],
+  ];
+  // CLAUDE_CONFIG_DIR unset: the config folder is <home>/.claude.
+  const homeCmds = H.mk(b.home, '.claude', 'commands');
+  cases.push(['~/.claude/commands, CLAUDE_CONFIG_DIR unset', homeCmds, { CLAUDE_PROJECT_DIR: b.proj }]);
+  let k = 120;
+  for (const [label, value, e] of cases) {
+    writeConfig(kit, { handoff_dir: value });
+    const sid = H.sessionId(k++);
+    const before = noteFiles(def).length;
+    const out = promptAt(b, kit, e, 150000, sid);
+    noBlocking(out);
+    assert.ok(out.systemMessage.includes(M.LINES.HANDOFF_DIR_REFUSED), label + ': said');
+    assert.equal(noteFiles(def).length, before + 1, label + ': default folder used');
+    for (const d of [b.config, commands, deep, homeCmds]) assert.equal(noteFiles(d).length, 0, label + ': nothing in the config folder');
+    const again = promptAt(b, kit, e, 200000, sid);
+    assert.ok(!(again.systemMessage || '').includes(M.LINES.HANDOFF_DIR_REFUSED), label + ': said once');
+  }
+  // Path-aware: <base>/config-notes is not inside <base>/config.
+  const sibling = H.mk(b.base, path.basename(b.config) + '-notes');
+  writeConfig(kit, { handoff_dir: sibling });
+  const ok = promptAt(b, kit, env, 150000, H.sessionId(140));
+  assert.ok(!(ok.systemMessage || '').includes(M.LINES.HANDOFF_DIR_REFUSED));
+  assert.equal(noteFiles(sibling).length, 1);
+  // Unit level: the same answers from resolveHandoffDir.
+  const cfgReal = M.configDirOf(env, b.home);
+  assert.deepEqual(M.resolveHandoffDir(commands, { configDir: cfgReal, gitCeiling: b.base }), { refused: true });
+  assert.deepEqual(M.resolveHandoffDir(sibling, { configDir: cfgReal, gitCeiling: b.base }), { dir: sibling });
+});
+
+test('6.6 / SR-C6 (L-3): the hook still fails safe on a refused handoff_dir: exit 0, no blocking field, the refusal line once (real process)', () => {
+  const b = H.makeBase('hdir-proc');
+  const kit = H.copyKit(b);
+  writeConfig(kit, { handoff_dir: H.mk(b.config, 'commands') });
+  const t = H.writeTranscript(b, 150000);
+  const r = R.runMeter(b, { scriptFile: kit.scriptFile, input: JSON.stringify(H.promptInput(b, t)), env: H.copyEnv(b) });
+  assert.equal(r.status, 0);
+  const out = JSON.parse(r.text);
+  noBlocking(out);
+  assert.ok(out.systemMessage.includes(M.LINES.HANDOFF_DIR_REFUSED));
+  assert.equal(noteFiles(path.join(b.config, 'commands')).length, 0);
+});
+
 test('6.6 a / 6.11 f: the meter uses the one printable-path table and cap; session-start.cjs imports them', () => {
   const S = require('../../src/core/hooks/session-start.cjs');
   assert.equal(S.printablePath, M.printablePath);
@@ -530,6 +618,11 @@ test('6.6 a / 6.11 f (MUST): a hand-off folder whose note path holds a character
     ['bidi (U+061C)', 'a؜b'],
     ['zero_width', 'a​b'],
     ['zero_width (U+FEFF)', 'a﻿b'],
+    ['format (soft hyphen)', 'a­b'],
+    ['format (U+2061)', 'a⁡b'],
+    ['format (U+FFF9)', 'a￹b'],
+    ['tags (U+E0041)', 'a\u{e0041}b'],
+    ['tags (U+E007F)', 'a\u{e007f}b'],
   ];
   if (!IS_WIN) cases.push(['controls (C0, line feed)', 'a\nb']);
   const covered = new Set();
