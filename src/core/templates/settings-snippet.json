@@ -27,6 +27,6 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "\"<NODE>\" \"<KIT>/hooks/meter.cjs\" --statusline"
+    "command": "'<NODE>' '<KIT>/hooks/meter.cjs' --statusline"
   }
 }

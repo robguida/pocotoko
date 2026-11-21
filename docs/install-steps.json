@@ -1,0 +1,52 @@
+{
+  "about": "The one source of the copy-by-hand install and uninstall steps (spec 12.2, 12.3). Data only: every path uses the placeholders below, and no field holds shell text. docs/install.md shows these steps per shell, rendered by node scripts/copy-by-hand.mjs --render. Its --check option performs them in a sandbox home.",
+  "placeholders": {
+    "<REPO>": "the full path of the kit download (the folder that holds src/)",
+    "<CONFIG>": "the full path of your Claude config folder (normally the .claude folder in your home folder)",
+    "<KIT>": "the full path of a new kit folder the steps create, named pocotoko (suggested: the pocotoko folder inside your Claude config folder). It must not exist yet.",
+    "<NODE>": "the full path of the Node program (never a bare node)"
+  },
+  "marker": { "path": "<KIT>/.pocotoko-kit", "first_line": "pocotoko kit folder", "kit_name": "pocotoko" },
+  "install": [
+    { "id": "kit-folder", "part": "core", "optional": false, "type": "mkdir", "path": "<KIT>", "new_kit": true, "note": "Make the new kit folder and its marker file. If the folder already exists, or is not named pocotoko, stop. Nothing is changed." },
+    { "id": "kit-hooks-folder", "part": "core", "optional": false, "type": "mkdir", "path": "<KIT>/hooks", "note": "Make the hooks folder." },
+    { "id": "copy-meter", "part": "core", "optional": false, "type": "copy-file", "from": "<REPO>/src/core/hooks/meter.cjs", "to": "<KIT>/hooks/meter.cjs", "note": "Copy the chat-length meter." },
+    { "id": "copy-session-start", "part": "core", "optional": false, "type": "copy-file", "from": "<REPO>/src/core/hooks/session-start.cjs", "to": "<KIT>/hooks/session-start.cjs", "note": "Copy the session-start hook." },
+    { "id": "skills-folder", "part": "core", "optional": false, "type": "mkdir", "path": "<CONFIG>/skills", "record_if_created": "skills", "note": "Make the skills folder if it is not there yet, and note in the marker file that the steps made it." },
+    { "id": "copy-skill-model-routing", "part": "core", "optional": false, "type": "copy-dir-no-overwrite", "from": "<REPO>/src/core/skills/model-routing", "to": "<CONFIG>/skills/model-routing", "note": "Copy the model-routing skill. If a folder of that name exists, stop. It is never overwritten." },
+    { "id": "copy-skill-handoff", "part": "core", "optional": false, "type": "copy-dir-no-overwrite", "from": "<REPO>/src/core/skills/handoff", "to": "<CONFIG>/skills/handoff", "note": "Copy the handoff skill. If a folder of that name exists, stop. It is never overwritten." },
+    {
+      "id": "merge-settings", "part": "core", "optional": false, "type": "merge-settings",
+      "from": "<REPO>/src/core/templates/settings-snippet.json", "target": "<CONFIG>/settings.json", "record_if_created": "settings.json",
+      "status_line": {
+        "bash": { "type": "command", "command": "'<NODE>' '<KIT>/hooks/meter.cjs' --statusline" },
+        "powershell": { "type": "command", "command": "& '<NODE>' '<KIT>/hooks/meter.cjs' --statusline" }
+      },
+      "note": "Add the two hooks from the snippet and one status line form, by shell, always under the key statusLine. Never replace an existing entry. A merge is done by hand in a text editor, in every shell."
+    },
+    { "id": "meter-config-folder", "part": "core", "optional": true, "type": "mkdir", "path": "<KIT>/config", "note": "The folder for the meter options." },
+    {
+      "id": "meter-config", "part": "core", "optional": true, "type": "write-json", "path": "<KIT>/config/meter-config.json",
+      "content": { "soft_tokens": 100000, "hard_tokens": 150000, "repeat_every_tokens": 50000, "handoff_note": true, "handoff_dir": "", "routing_rules_at_start": true },
+      "note": "The meter options with their defaults. Never overwrites an existing file."
+    },
+    { "id": "search-data-folder", "part": "search", "optional": true, "type": "mkdir", "path": "<KIT>/search/data", "note": "The folder for its options and index." },
+    { "id": "copy-search-server", "part": "search", "optional": true, "type": "copy-dir-no-overwrite", "from": "<REPO>/src/search/server", "to": "<KIT>/search/server", "note": "Copy the search server. If the folder exists, stop." },
+    {
+      "id": "search-config", "part": "search", "optional": true, "type": "write-json", "path": "<KIT>/search/data/search-config.json",
+      "content": { "projects": [] },
+      "note": "Its options. Add the full path of each project folder to index to the projects list. Never overwrites an existing file."
+    },
+    { "id": "search-register", "part": "search", "optional": true, "type": "mcp-add-user", "name": "pocotoko-search", "command": "<NODE>", "args": ["<KIT>/search/server/server.cjs"], "note": "Register the server at user scope, exec form." }
+  ],
+  "uninstall": [
+    { "id": "search-unregister", "part": "search", "optional": true, "type": "mcp-remove-user", "name": "pocotoko-search", "note": "Remove the search server registration." },
+    { "id": "remove-settings", "part": "core", "optional": false, "type": "remove-settings-entries", "target": "<CONFIG>/settings.json", "entries_from": "merge-settings", "delete_if_created": "settings.json", "note": "Remove the two hooks and the kit's statusLine (either form). Nothing else is changed. A file left holding nothing is deleted only if the marker file says the steps made it. Done by hand in a text editor, in every shell." },
+    { "id": "remove-routing-block", "part": "core", "optional": true, "type": "remove-marked-block", "target": "<CONFIG>/CLAUDE.md", "block_from": "<REPO>/src/core/templates/rules-block.md", "note": "If you pasted the routing block, delete it, markers included. Done by hand in a text editor." },
+    { "id": "remove-search-block", "part": "search", "optional": true, "type": "remove-marked-block", "target": "<CONFIG>/CLAUDE.md", "block_from": "<REPO>/src/search/templates/rules-block.md", "note": "If you pasted the search block, delete it, markers included. Done by hand in a text editor." },
+    { "id": "remove-skill-model-routing", "part": "core", "optional": false, "type": "remove-dir", "path": "<CONFIG>/skills/model-routing", "only_if_same_as": "<REPO>/src/core/skills/model-routing", "note": "Delete the model-routing skill, only if it is still the kit's copy." },
+    { "id": "remove-skill-handoff", "part": "core", "optional": false, "type": "remove-dir", "path": "<CONFIG>/skills/handoff", "only_if_same_as": "<REPO>/src/core/skills/handoff", "note": "Delete the handoff skill, only if it is still the kit's copy." },
+    { "id": "remove-skills-folder", "part": "core", "optional": false, "type": "remove-dir", "path": "<CONFIG>/skills", "only_if_created": "skills", "note": "Delete the skills folder, only if the steps made it and it is now empty." },
+    { "id": "remove-kit", "part": "core", "optional": false, "type": "remove-dir", "path": "<KIT>", "only_if_kit": true, "note": "Delete the kit folder (state, notes, options and the search index go with it), only if it is named pocotoko, holds the marker file, and is not the config folder, the home folder or a folder above either." }
+  ]
+}

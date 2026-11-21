@@ -28,7 +28,7 @@ The status line copy of the meter is at:
 
 The status line command runs through a shell: on Windows through Git Bash, or PowerShell when Git Bash is not installed; on macOS and Linux through the normal shell.
 
-**Write every path with forward slashes.** Turn each backslash in the Node path and in the meter path into `/` (for example `C:/Program Files/nodejs/node.exe`, or `//server/share/...` for a network path). Node accepts forward slashes on Windows. Never double the backslashes. Keep both paths in double quotes, as shown.
+**Write every path with forward slashes.** Turn each backslash in the Node path and in the meter path into `/` (for example `C:/Program Files/nodejs/node.exe`, or `//server/share/...` for a network path). Node accepts forward slashes on Windows. Never double the backslashes in a path. Keep both paths in single quotes, as shown, so the shell never expands a `$` or a backtick in a path. If a path holds a single quote, write it in the settings file as `'\\''` in the Git Bash form (the JSON text for the shell's `'\''`) and as `''` in the PowerShell form.
 
 **Pick the form:**
 
@@ -38,7 +38,7 @@ The status line command runs through a shell: on Windows through Git Bash, or Po
 {
   "statusLine": {
     "type": "command",
-    "command": "\"<NODE>\" \"${CLAUDE_PLUGIN_DATA}/statusline/meter.cjs\" --statusline"
+    "command": "'<NODE>' '${CLAUDE_PLUGIN_DATA}/statusline/meter.cjs' --statusline"
   }
 }
 ```
@@ -49,7 +49,7 @@ The status line command runs through a shell: on Windows through Git Bash, or Po
 {
   "statusLine": {
     "type": "command",
-    "command": "& \"<NODE>\" \"${CLAUDE_PLUGIN_DATA}/statusline/meter.cjs\" --statusline"
+    "command": "& '<NODE>' '${CLAUDE_PLUGIN_DATA}/statusline/meter.cjs' --statusline"
   }
 }
 ```

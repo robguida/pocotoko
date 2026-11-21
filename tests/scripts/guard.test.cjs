@@ -325,9 +325,40 @@ test('the PowerShell expansion check refuses a path outside sandbox/', () => {
   assert.match(G.checkExpandedPaths(['relative'])[0], /not an absolute path/);
 });
 
-test('the PowerShell shell half refuses until it is built (B9)', (t) => {
-  assert.throws(() => G.expandInPowerShell(), G.GuardRefusal);
-  t.diagnostic('asking PowerShell what a rendered block expands to arrives with copy-by-hand.mjs in B9');
+test('the PowerShell shell half takes only the four plain variable lines of a rendered block', () => {
+  const ok = ["$REPO = 'a'", "$CONFIG = 'b'", "$KIT = 'c'", "$NODE = 'd'"];
+  assert.match(G.expandInPowerShell({}).error, /needs the program/);
+  assert.match(G.expandInPowerShell({ exe: 'x', varLines: ok.slice(0, 3) }).error, /needs the program and the four variable lines/);
+  for (const bad of ["$KIT = 'c'; Remove-Item x", '$KIT = "$HOME"', "$OTHER = 'c'", "$KIT = 'c' + 'd'"]) {
+    assert.match(G.expandInPowerShell({ exe: 'x', varLines: [ok[0], ok[1], bad, ok[3]] }).error, /not a plain assignment/, bad);
+  }
+});
+
+test('13.7: before a rendered block runs, its shell is asked what the variables expand to, and a write target outside sandbox/ is refused (PowerShell on Windows; bash where present)', async (t) => {
+  const D = await import(pathToFileURL(path.join(REPO, 'scripts', 'lib', 'dev-run.mjs')).href);
+  const shells = D.findShells();
+  const inside = path.join(SANDBOX, 'guard', 'x', 'home', '.claude').split(path.sep).join('/');
+  const outside = path.join(os.userInfo().homedir, '.claude').split(path.sep).join('/');
+  const repo = REPO.split(path.sep).join('/');
+  const node = process.execPath.split(path.sep).join('/');
+  const lines = (shell, cfg) => [['REPO', repo], ['CONFIG', cfg], ['KIT', cfg + '/pocotoko'], ['NODE', node]]
+    .map(([k, v]) => (shell === 'bash' ? k + "='" + v + "'" : '$' + k + " = '" + v + "'"));
+  let ran = 0;
+  // A sandbox run environment, so neither shell writes its caches into the real profile.
+  const run = D.makeRun('guard-test', 'expansion');
+  t.after(() => D.removeRun(run));
+  for (const shell of ['powershell', 'bash']) {
+    if (!shells[shell]) { t.diagnostic(shell + ': ' + shells.why[shell]); continue; }
+    ran++;
+    const env = D.runEnv(run);
+    const good = D.askExpansion(shell, shells[shell], lines(shell, inside), { env, cwd: run.project });
+    assert.ok(good.values, shell + ' answered');
+    assert.deepEqual(D.expansionProblems(good.values), [], shell + ': all inside');
+    const bad = D.askExpansion(shell, shells[shell], lines(shell, outside), { env, cwd: run.project });
+    const p = D.expansionProblems(bad.values);
+    assert.ok(p.some((x) => /CONFIG lands outside sandbox/.test(x)) && p.some((x) => /KIT lands outside sandbox/.test(x)), shell + ': ' + p.join('; '));
+  }
+  if (!ran) t.skip('neither shell found on this machine');
 });
 
 test('sandbox.mjs and copy-by-hand.mjs share this one guard module', (t) => {

@@ -10,7 +10,7 @@ jobs:
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     strategy:
@@ -18,6 +18,8 @@ jobs:
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
         node: [22, 24, 26]
+    env:
+      CLAUDE_CODE_VERSION: 2.1.329
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -31,8 +33,22 @@ jobs:
         run: npm test
       - name: Run the public scrub scan
         run: node scripts/scrub-scan.mjs
+      - name: Install the pinned Claude Code into a job-local folder
+        shell: bash
+        run: npm install --prefix "$RUNNER_TEMP/claude-code" --ignore-scripts --no-save --no-audit --no-fund "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
+      - name: Validate both plugins and the marketplace (strict)
+        shell: bash
+        run: node scripts/sandbox.mjs --validate --find-in "$RUNNER_TEMP/claude-code" | tee "$RUNNER_TEMP/check-validate.txt"
+      - name: Plugin install proof
+        shell: bash
+        run: node scripts/sandbox.mjs --check --find-in "$RUNNER_TEMP/claude-code" | tee "$RUNNER_TEMP/check-sandbox.txt"
+      - name: Copy-by-hand install proof (Node, bash, and on Windows PowerShell)
+        shell: bash
+        run: node scripts/copy-by-hand.mjs --check --find-in "$RUNNER_TEMP/claude-code" | tee "$RUNNER_TEMP/check-copy-by-hand.txt"
       - name: Job summary
         if: always()
         shell: bash
         run: |
-          echo "Skipped steps: 0. Steps that need a login arrive in a later build step and will show SKIPPED with a reason." >> "$GITHUB_STEP_SUMMARY"
+          skipped=$(cat "$RUNNER_TEMP"/check-*.txt 2>/dev/null | grep -hoE ': succeeded [0-9]+, failed [0-9]+, skipped [0-9]+' | awk '{ s += $NF } END { print s + 0 }')
+          echo "Skipped steps: ${skipped} (the sum of each check's own skipped count). Each skipped step shows SKIPPED with a reason below; a skip never counts toward the release gate." >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP"/check-*.txt 2>/dev/null | grep -e '^SKIPPED' -e '^FAILED' -e '^  held' -e '^  skipped' -e '^  not-run' >> "$GITHUB_STEP_SUMMARY" || true

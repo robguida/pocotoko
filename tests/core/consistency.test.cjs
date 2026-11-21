@@ -4,7 +4,7 @@
 //   B8: README's T-11 row text and the SR-50 points (T-33), docs/install.md, docs/search.md,
 //       docs/session-limits.md, docs/prompt-cache.md, docs/token-habits.md and every 14.5
 //       page, CODEOWNERS, the README floor line with `engines`.
-//   B9: the docs/install.md shell blocks against a fresh render of docs/install-steps.json.
+//   B9 (done, at the end of this file): the docs/install.md blocks against a fresh render of docs/install-steps.json.
 // The search plugin's 9.13 option table and its env-only mapping are checked in
 // tests/search/static.test.cjs (same 15.1 row); they are not copied here.
 
@@ -339,9 +339,11 @@ test('6.12 / SR-C5: meter-statusline is user-invoked only, names only the user-l
     'Never use a bare `node` as the command',
     '`' + DOLLAR_BRACE + 'CLAUDE_PLUGIN_DATA}/statusline/meter.cjs`',
     // 6.12 a to c: forward slashes; the Git Bash / macOS / Linux form and the PowerShell form; pick or ask.
-    '"command": "\\"<NODE>\\" \\"' + DOLLAR_BRACE + 'CLAUDE_PLUGIN_DATA}/statusline/meter.cjs\\" --statusline"',
-    '"command": "& \\"<NODE>\\" \\"' + DOLLAR_BRACE + 'CLAUDE_PLUGIN_DATA}/statusline/meter.cjs\\" --statusline"',
-    'Write every path with forward slashes.', 'Never double the backslashes.',
+    // 12.2 g: both paths in single quotes, so the shell never expands a $ or a backtick in a path.
+    '"command": "\'<NODE>\' \'' + DOLLAR_BRACE + 'CLAUDE_PLUGIN_DATA}/statusline/meter.cjs\' --statusline"',
+    '"command": "& \'<NODE>\' \'' + DOLLAR_BRACE + 'CLAUDE_PLUGIN_DATA}/statusline/meter.cjs\' --statusline"',
+    'Keep both paths in single quotes', "write it in the settings file as `'\\\\''` in the Git Bash form", "and as `''` in the PowerShell form",
+    'Write every path with forward slashes.', 'Never double the backslashes in a path.',
     'PowerShell, only on Windows without Git Bash', 'check whether Git Bash is installed',
     'If you cannot tell, show both forms and ask the user which applies.',
     'The only file this skill may change is the **user-level settings file**',
@@ -378,9 +380,23 @@ test('12.2 step 3: settings-snippet.json is a paste-safe settings fragment with 
     assert.deepEqual(j.hooks[ev], [{ hooks: [{ type: 'command', command: '<NODE>', args: ['<KIT>/hooks/' + script], timeout }] }], ev);
     assert.ok(fs.existsSync(path.join(CORE, 'hooks', script)));
   }
-  assert.deepEqual(j.statusLine, { type: 'command', command: '"<NODE>" "<KIT>/hooks/meter.cjs" --statusline' });
+  assert.deepEqual(j.statusLine, { type: 'command', command: "'<NODE>' '<KIT>/hooks/meter.cjs' --statusline" });
   assert.ok(!text.includes('$HOME') && !text.includes('~/'), 'never $HOME');
   assert.ok(!/\bnode\b/.test(text), 'never a bare node');
   assert.ok(!text.includes(DOLLAR_BRACE), 'no variables, placeholders only');
   for (const m of text.matchAll(/<([A-Z]+)>/g)) assert.ok(['NODE', 'KIT'].includes(m[1]), m[0]);
+});
+
+// ---------------------------------------------------------------------------
+// docs/install.md against docs/install-steps.json (12.2 b)
+
+test('12.2 b: every marked block of docs/install.md (bash, PowerShell, the settings lines, both uninstall blocks) equals a fresh render of docs/install-steps.json', async () => {
+  const { pathToFileURL } = require('node:url');
+  const S = await import(pathToFileURL(path.join(REPO_TOP, 'scripts', 'lib', 'install-steps.mjs')).href);
+  const { doc } = S.loadSteps(REPO_TOP);
+  const blocks = S.renderBlocks(doc, REPO_TOP);
+  const md = read('docs', 'install.md');
+  for (const name of S.BLOCK_NAMES) assert.equal(S.extractBlock(md, name), blocks[name], name + ' differs from a fresh render: run node scripts/copy-by-hand.mjs --render');
+  // No rendered block holds a key that is not a real settings key (12.2 a).
+  for (const m of blocks.settings.matchAll(/```json\n([\s\S]*?)\n```/g)) assert.deepEqual(Object.keys(JSON.parse(m[1])).sort(), ['hooks', 'statusLine']);
 });

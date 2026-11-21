@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 // Variables that must all point at folders under sandbox/ (13.7).
@@ -267,15 +268,26 @@ export function checkExpandedPaths(paths, { repo = kitRoot(), platform = process
 
 /**
  * Shell half of the PowerShell expansion check (13.7): ask the same shell
- * what a rendered command expands to.
- *
- * TODO(B9): built with copy-by-hand.mjs, when the rendered PowerShell block
- * exists (spec 16, step 9). Build step 0b covers only the variable refusals
- * and the narrow listing. Until then this refuses, so nothing can run a
- * PowerShell block unchecked.
+ * what a rendered block expands to. A rendered block builds every path from
+ * four variable lines ($REPO, $CONFIG, $KIT, $NODE; tested in
+ * install-steps.test.cjs), so PowerShell runs only those lines and prints the
+ * four values. The caller then refuses any write target outside sandbox/
+ * (checkExpandedPaths). Reads only: the lines are assignments.
+ * Returns { values: { REPO, CONFIG, KIT, NODE } } or { error }.
  */
-export function expandInPowerShell() {
-  throw new GuardRefusal(['PowerShell expansion check is not built yet (arrives with copy-by-hand.mjs in B9); no PowerShell block may run']);
+export function expandInPowerShell({ exe, varLines, env, cwd } = {}) {
+  if (!exe || !Array.isArray(varLines) || varLines.length !== 4) return { error: 'PowerShell expansion check needs the program and the four variable lines' };
+  for (const l of varLines) {
+    // A single-quoted value; a quote inside is written '' (12.2 g).
+    if (!/^\$(REPO|CONFIG|KIT|NODE) = '(?:[^'\r\n]|'')*'$/.test(l)) return { error: 'a PowerShell variable line is not a plain assignment' };
+  }
+  const script = varLines.join('; ') + '; ConvertTo-Json -Compress @($REPO, $CONFIG, $KIT, $NODE)';
+  const r = spawnSync(exe, ['-NoProfile', '-NonInteractive', '-Command', script], { env, cwd, encoding: 'utf8', windowsHide: true, timeout: 60000 });
+  if (r.status !== 0) return { error: 'PowerShell exited ' + r.status };
+  let v;
+  try { v = JSON.parse(String(r.stdout).trim()); } catch (_) { return { error: 'PowerShell gave no readable answer' }; }
+  if (!Array.isArray(v) || v.length !== 4) return { error: 'PowerShell gave no readable answer' };
+  return { values: { REPO: v[0], CONFIG: v[1], KIT: v[2], NODE: v[3] } };
 }
 
 // ---------------------------------------------------------------------------
