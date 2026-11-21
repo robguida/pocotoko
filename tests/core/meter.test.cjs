@@ -516,7 +516,7 @@ test('6.6 a / 6.11 f: the meter uses the one printable-path table and cap; sessi
   assert.ok(/^[\x20-\x7e]+$/.test(M.LINES.NOTE_UNPRINTABLE), 'ASCII line');
 });
 
-test('6.6 a / 6.11 f (MUST): a hand-off folder whose note path holds a character of each 6.11 f class, or is over 1,024 characters, gets no pre-create and is never named; the warning still fires; the line comes once per session', () => {
+test('6.6 a / 6.11 f (MUST): a hand-off folder whose note path holds a character of each 6.11 f class, or is over 1,024 characters, gets no pre-create and is never named; the warning still fires; the line comes once per session', (t) => {
   const b = H.makeBase('hprint');
   const kit = H.copyKit(b);
   const env = H.copyEnv(b);
@@ -555,16 +555,35 @@ test('6.6 a / 6.11 f (MUST): a hand-off folder whose note path holds a character
     assert.equal(noteFiles(dir).length, 0, label + ': still nothing pre-created');
   }
   assert.deepEqual([...covered].sort(), Object.keys(M.UNPRINTABLE_CLASSES).sort(), 'one case per class');
-  // Over 1,024 characters: a real nested folder, itself over the cap.
+  // Over 1,024 characters, two real nested folders. (1) The folder fits every OS path limit
+  // (macOS cannot make or open a full path of 1,024 bytes or more; ASCII here, so characters =
+  // bytes), but the note path at the longest clash name does not: the check is on the note path.
+  // (2) The folder itself is over the cap, where the OS can make it (macOS: mkdir gives ENAMETOOLONG).
+  const FIT = 1000;
+  let fitDir = b.base;
+  while (fitDir.length + 121 <= FIT) fitDir = path.join(fitDir, 'd'.repeat(120));
+  if (FIT - fitDir.length - 1 >= 1) fitDir = path.join(fitDir, 'e'.repeat(FIT - fitDir.length - 1));
+  const tail = (path.sep + M.noteBaseName(new Date(), b.proj, H.sessionId(90)) + '-' + M.LIMITS.NOTE_CLASH_MAX + '.md').length;
+  assert.ok(fitDir.length <= FIT && fitDir.length + tail > M.LIMITS.PATH_MAX_CHARS, 'the folder fits; its note path is over the cap');
   let longDir = b.base;
   while (longDir.length <= 1024) longDir = path.join(longDir, 'd'.repeat(120));
-  fs.mkdirSync(longDir, { recursive: true });
-  writeConfig(kit, { handoff_dir: longDir });
-  const long = promptAt(b, kit, env, 150000, H.sessionId(90));
-  assert.ok(long && long.hookSpecificOutput, 'over 1,024: the warning still fires');
-  assert.ok(!(long.hookSpecificOutput.additionalContext + long.systemMessage).includes('d'.repeat(120)), 'over 1,024: not named');
-  assert.ok(long.systemMessage.includes(M.LINES.NOTE_UNPRINTABLE), 'over 1,024: said');
-  assert.equal(noteFiles(longDir).length, 0, 'over 1,024: nothing pre-created');
+  const longCases = [['note path over 1,024', fitDir, 90]];
+  try {
+    fs.mkdirSync(longDir, { recursive: true });
+    longCases.push(['folder over 1,024', longDir, 92]);
+  } catch (err) {
+    if (!err || err.code !== 'ENAMETOOLONG' || process.platform !== 'darwin') throw err;
+    t.diagnostic('folder over 1,024: macOS cannot make a folder by such a full path (ENAMETOOLONG), so only the note-path case runs');
+  }
+  fs.mkdirSync(fitDir, { recursive: true });
+  for (const [label, dir, n] of longCases) {
+    writeConfig(kit, { handoff_dir: dir });
+    const long = promptAt(b, kit, env, 150000, H.sessionId(n));
+    assert.ok(long && long.hookSpecificOutput, label + ': the warning still fires');
+    assert.ok(!(long.hookSpecificOutput.additionalContext + long.systemMessage).includes('d'.repeat(120)), label + ': not named');
+    assert.ok(long.systemMessage.includes(M.LINES.NOTE_UNPRINTABLE), label + ': said');
+    assert.equal(noteFiles(dir).length, 0, label + ': nothing pre-created');
+  }
   // A control: a printable folder still gets its note, named.
   const good = H.mk(b.base, 'plain notes');
   writeConfig(kit, { handoff_dir: good });

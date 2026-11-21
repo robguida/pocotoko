@@ -49,6 +49,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          skipped=$(cat "$RUNNER_TEMP"/check-*.txt 2>/dev/null | grep -hoE ': succeeded [0-9]+, failed [0-9]+, skipped [0-9]+' | awk '{ s += $NF } END { print s + 0 }')
+          skipped=$(cat "$RUNNER_TEMP"/check-*.txt 2>/dev/null | grep -hoE ': succeeded [0-9]+, failed [0-9]+, skipped [0-9]+' | awk '{ s += $NF } END { print s + 0 }' || true)
+          ls "$RUNNER_TEMP"/check-*.txt > /dev/null 2>&1 || echo "No check step ran: an earlier step failed, so the skipped count below covers nothing." >> "$GITHUB_STEP_SUMMARY"
           echo "Skipped steps: ${skipped} (the sum of each check's own skipped count). Each skipped step shows SKIPPED with a reason below; a skip never counts toward the release gate." >> "$GITHUB_STEP_SUMMARY"
           cat "$RUNNER_TEMP"/check-*.txt 2>/dev/null | grep -e '^SKIPPED' -e '^FAILED' -e '^  held' -e '^  skipped' -e '^  not-run' >> "$GITHUB_STEP_SUMMARY" || true

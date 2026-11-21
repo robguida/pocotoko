@@ -45,7 +45,7 @@ If you are an outside contributor, run the public layer. A maintainer runs the p
 
 ## The install checks
 
-`node scripts/sandbox.mjs --check` and `node scripts/copy-by-hand.mjs --check` install the kit into a throwaway home folder, run the hooks, and uninstall. They need a Claude Code program, given with `--claude-code <file>` or `--find-in <npm prefix>`. With none given they report SKIPPED, and a skip never counts as a pass.
+`node scripts/sandbox.mjs --check` and `node scripts/copy-by-hand.mjs --check` install the kit into a throwaway home folder, run the hooks, and uninstall. They need a Claude Code program, given with `--claude-code <file>` or `--find-in <npm prefix>`. An npm install with `--ignore-scripts` (as CI does) is enough for `--find-in`: it runs the program from the platform package npm installs alongside. With none given they report SKIPPED, and a skip never counts as a pass.
 
 **Close every Claude Code session before you run them, and run them from a plain terminal.** A live session rewrites parts of the config folder, and the checks watch a few of those files to prove they were not touched. CI has no live session.
 

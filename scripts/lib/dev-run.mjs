@@ -16,8 +16,12 @@ export const REPO = G.kitRoot();
 // Claude Code's own settings, CI tokens, Node preload options, every git
 // variable (one set by a git hook, such as GIT_DIR or GIT_INDEX_FILE, would
 // point a sandbox git call at the real repo; the guard sets its own), shell
-// start files, the SSH agent, and anything named like a credential.
-const DROP = /^(?:ANTHROPIC|CLAUDE|AWS_|AZURE_|GOOGLE_|GCLOUD|CLOUDSDK|VERTEX|BEDROCK|OPENAI|GH_|GITHUB_|GIT_|ACTIONS_|NPM_TOKEN$|NODE_AUTH_TOKEN$|NODE_OPTIONS$|NODE_PATH$|NODE_TEST_CONTEXT$|NODE_DEBUG|NO_COLOR$|BASH_ENV$|ENV$|SSH_AUTH_SOCK$|SSH_AGENT_PID$)/i;
+// start files, PowerShell's module path, the SSH agent, and anything named
+// like a credential. PSModulePath: a parent PowerShell 7 (the default `run`
+// shell on GitHub's Windows runners) leaves its own module folders first on it,
+// and Windows PowerShell 5.1 started below it then cannot load Get-FileHash, so
+// the uninstall block's kit-copy checks fail. Unset, each PowerShell builds its own.
+const DROP = /^(?:ANTHROPIC|CLAUDE|AWS_|AZURE_|GOOGLE_|GCLOUD|CLOUDSDK|VERTEX|BEDROCK|OPENAI|GH_|GITHUB_|GIT_|ACTIONS_|NPM_TOKEN$|NODE_AUTH_TOKEN$|NODE_OPTIONS$|NODE_PATH$|NODE_TEST_CONTEXT$|NODE_DEBUG|NO_COLOR$|BASH_ENV$|ENV$|PSModulePath$|SSH_AUTH_SOCK$|SSH_AGENT_PID$)/i;
 const CREDENTIAL = /(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|_KEY$)/i;
 
 export function cleanBaseEnv(env = process.env) {
@@ -180,23 +184,66 @@ export function checkCmdArgs(args, { repo = REPO } = {}) {
 }
 
 /**
+ * The platform package key the Claude Code npm package uses for this machine
+ * (13.4): <platform>-<arch>, with -musl on a Linux whose C library is not glibc.
+ */
+export function platformKey(platform = process.platform, arch = process.arch, musl = null) {
+  if (platform !== 'linux') return platform + '-' + arch;
+  let isMusl = musl;
+  if (isMusl === null) {
+    let report = null;
+    try { report = typeof process.report?.getReport === 'function' ? process.report.getReport() : null; } catch (_) { report = null; }
+    isMusl = !!(report && report.header && report.header.glibcVersionRuntime === undefined);
+  }
+  return 'linux-' + arch + (isMusl ? '-musl' : '');
+}
+
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return null; }
+}
+
+/**
+ * The native program inside the platform package the wrapper package lists in
+ * optionalDependencies (13.4): installed with --ignore-scripts, the wrapper's bin
+ * entry is only a placeholder that exits 1, because its install script never ran.
+ * Looked for beside the wrapper (npm's usual place) and inside it, at exactly the
+ * version the wrapper names. Null when not there.
+ */
+export function platformProgram(prefix, pkg, { platform = process.platform, key = platformKey(platform) } = {}) {
+  const name = '@anthropic-ai/claude-code-' + key;
+  const want = pkg && pkg.optionalDependencies && pkg.optionalDependencies[name];
+  if (!want) return null;
+  const parts = name.split('/');
+  const wrapper = path.join(prefix, 'node_modules', '@anthropic-ai', 'claude-code');
+  for (const dir of [path.join(prefix, 'node_modules', ...parts), path.join(wrapper, 'node_modules', ...parts)]) {
+    const meta = readJson(path.join(dir, 'package.json'));
+    if (!meta || meta.name !== name || meta.version !== want) continue;
+    const exe = path.join(dir, platform === 'win32' ? 'claude.exe' : 'claude');
+    try { if (fs.statSync(exe).isFile()) return exe; } catch (_) { /* next */ }
+  }
+  return null;
+}
+
+/**
  * Find the Claude Code program: --claude-code <file>, or --find-in <folder>
- * (an npm prefix holding the package; its package.json bin entry is used).
+ * (an npm prefix holding the package: the native program of its platform
+ * package when that is installed, else its package.json bin entry).
  * Returns { file, kind: 'exe' | 'js' | 'cmd' } or { missing: reason, named }. named is true
  * when a program was named but not found: the check then fails (exit 1); only an unnamed
  * program is a skip (13.4).
  */
-export function findCli({ file, findIn } = {}) {
+export function findCli({ file, findIn } = {}, { platform = process.platform, key } = {}) {
   let f = file || null;
   const named = !!(file || findIn);
   if (!f && findIn) {
-    const pkgDir = path.join(path.resolve(findIn), 'node_modules', '@anthropic-ai', 'claude-code');
-    try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'));
+    const prefix = path.resolve(findIn);
+    const pkgDir = path.join(prefix, 'node_modules', '@anthropic-ai', 'claude-code');
+    const pkg = readJson(path.join(pkgDir, 'package.json'));
+    if (!pkg) return { missing: 'no Claude Code package found under the --find-in folder', named };
+    f = platformProgram(prefix, pkg, key ? { platform, key } : { platform });
+    if (!f) {
       const bin = typeof pkg.bin === 'string' ? pkg.bin : pkg.bin && (pkg.bin.claude || Object.values(pkg.bin)[0]);
       if (bin) f = path.join(pkgDir, ...String(bin).split('/'));
-    } catch (_) {
-      return { missing: 'no Claude Code package found under the --find-in folder', named };
     }
     if (!f) return { missing: 'the Claude Code package under the --find-in folder names no program', named };
   }

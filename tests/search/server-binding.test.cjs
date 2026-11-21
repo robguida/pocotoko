@@ -515,19 +515,27 @@ test('Windows: status says the index takes the profile folder permissions (SR-23
   }
 });
 
-test('9.8 / SR-12 (6.11 f rule): a bound folder holding U+202E (enabled and indexed) or over 1,024 characters (not enabled) is shown in status as the unprintable-folder mask, never as the path', async () => {
+test('9.8 / SR-12 (6.11 f rule): a bound folder holding U+202E (enabled and indexed) or over 1,024 characters (not enabled) is shown in status as the unprintable-folder mask, never as the path', async (t) => {
   const run = H.makeBase('unprintable-root', {});
   const tag = 'rtl' + crypto.randomBytes(3).toString('hex');
   const bidi = path.join(run.base, tag + '\u202e' + 'dm.krow');
   fs.mkdirSync(bidi);
   fs.writeFileSync(path.join(bidi, 'n.md'), '# N\n\nthe marmot note\n');
+  const bidiReal = fs.realpathSync.native(bidi);
+  const kit = H.makeKit(run, { options: { projects: [bidiReal] } });
+  const cases = [['U+202E, enabled', bidiReal, true]];
+  // The over-1,024 case needs a real folder that long. macOS cannot make or open a folder by a
+  // full path of 1,024 bytes or more (PATH_MAX; mkdir gives ENAMETOOLONG), so there no session
+  // can be bound to such a folder by its path.
   let long = path.join(run.base, 'long' + tag);
   while (long.length <= 1024) long = path.join(long, 'd'.repeat(120));
-  fs.mkdirSync(long, { recursive: true });
-  const bidiReal = fs.realpathSync.native(bidi);
-  const longReal = fs.realpathSync.native(long);
-  const kit = H.makeKit(run, { options: { projects: [bidiReal] } });
-  const cases = [['U+202E, enabled', bidiReal, true], ['over 1,024 characters, not enabled', longReal, false]];
+  try {
+    fs.mkdirSync(long, { recursive: true });
+    cases.push(['over 1,024 characters, not enabled', fs.realpathSync.native(long), false]);
+  } catch (err) {
+    if (!err || err.code !== 'ENAMETOOLONG' || process.platform !== 'darwin') throw err;
+    t.diagnostic('over 1,024 characters: macOS cannot make a folder by such a full path (ENAMETOOLONG), so only the U+202E case runs');
+  }
   for (const [label, root, enabled] of cases) {
     // CLAUDE_PROJECT_DIR names the root; the start folder stays short, because Windows cannot start a
     // process in a folder over its path limit.

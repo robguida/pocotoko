@@ -72,6 +72,22 @@ test('the job summary prints a skipped count and says a skipped step shows its r
   assert.ok(codeText.includes("grep -e '^SKIPPED' -e '^FAILED' -e '^  held' -e '^  skipped' -e '^  not-run' >> \"$GITHUB_STEP_SUMMARY\""));
 });
 
+test('13.4: the job summary step cannot fail on its own: bash runs it with pipefail, so every line with a pipe or a file glob ends in || true or names the no-check case (first CI run)', () => {
+  const start = code.findIndex((l) => /^\s+- name:\s*Job summary\s*$/.test(l));
+  assert.ok(start > 0, 'job summary step');
+  let end = code.findIndex((l, i) => i > start && /^\s+- name:/.test(l));
+  if (end < 0) end = code.length;
+  const step = code.slice(start, end);
+  assert.ok(step.some((l) => /^\s+if:\s*always\(\)\s*$/.test(l)), 'runs after a failed step');
+  const body = step.slice(step.findIndex((l) => /^\s+run:\s*\|\s*$/.test(l)) + 1).filter((l) => l.trim() !== '');
+  assert.ok(body.length >= 3);
+  for (const l of body) {
+    if (!/\||check-\*\.txt/.test(l)) continue;
+    assert.ok(/\|\| (?:true\)?|echo "No check step ran: [^"]+" >> "\$GITHUB_STEP_SUMMARY")\s*$/.test(l), 'can fail under pipefail: ' + l.trim());
+  }
+  assert.ok(body.some((l) => l.includes('No check step ran')), 'says when no check step ran');
+});
+
 test('13.4 full steps (B9), in order: npm test, the public scrub, a pinned Claude Code in a job-local folder, validate --strict, the plugin install proof, the copy-by-hand proof', () => {
   const order = [
     /^\s+run:\s*npm test\s*$/m,

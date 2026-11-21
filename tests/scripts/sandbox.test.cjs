@@ -95,14 +95,91 @@ test('13.4: a named Claude Code program that is not found, or will not start, fa
   }
 });
 
-test('13.7: the child environment drops every git variable, shell start files, the SSH agent and anything named like a credential', async () => {
+test('13.4: --find-in uses the native program of the platform package at the exact version the package names; else the bin entry', async () => {
+  const { pathToFileURL } = require('node:url');
+  const D = await import(pathToFileURL(path.join(REPO_TOP, 'scripts', 'lib', 'dev-run.mjs')).href);
+  assert.equal(D.platformKey('win32', 'x64'), 'win32-x64');
+  assert.equal(D.platformKey('darwin', 'arm64'), 'darwin-arm64');
+  assert.equal(D.platformKey('linux', 'x64', false), 'linux-x64');
+  assert.equal(D.platformKey('linux', 'arm64', true), 'linux-arm64-musl');
+  const dir = makeTempDir('find-in');
+  made.push(dir);
+  const nm = path.join(dir, 'node_modules', '@anthropic-ai');
+  const wrapper = path.join(nm, 'claude-code');
+  fs.mkdirSync(path.join(wrapper, 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(wrapper, 'bin', 'claude.exe'), 'placeholder\n');
+  const opt = { '@anthropic-ai/claude-code-linux-x64': '9.9.9', '@anthropic-ai/claude-code-win32-x64': '9.9.9' };
+  fs.writeFileSync(path.join(wrapper, 'package.json'), JSON.stringify({ name: '@anthropic-ai/claude-code', version: '9.9.9', bin: { claude: 'bin/claude.exe' }, optionalDependencies: opt }));
+  const plat = (key, version, where = nm) => {
+    const d = path.join(where, 'claude-code-' + key);
+    fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ name: '@anthropic-ai/claude-code-' + key, version }));
+    const exe = path.join(d, key.startsWith('win32') ? 'claude.exe' : 'claude');
+    fs.writeFileSync(exe, 'native\n');
+    return exe;
+  };
+  const bin = path.join(wrapper, 'bin', 'claude.exe');
+  // No platform package installed: the bin entry, as before.
+  assert.equal(D.findCli({ findIn: dir }, { platform: 'linux', key: 'linux-x64' }).file, bin);
+  // A platform package at another version, or one the wrapper does not list: not used.
+  plat('linux-x64', '9.9.8');
+  assert.equal(D.findCli({ findIn: dir }, { platform: 'linux', key: 'linux-x64' }).file, bin);
+  const musl = plat('linux-x64-musl', '9.9.9');
+  assert.equal(D.findCli({ findIn: dir }, { platform: 'linux', key: 'linux-x64-musl' }).file, bin, 'not listed by the wrapper');
+  assert.ok(fs.existsSync(musl));
+  // Beside the wrapper at the named version (npm's usual place): used, as a native program.
+  fs.rmSync(path.join(nm, 'claude-code-linux-x64'), { recursive: true, force: true });
+  const linux = plat('linux-x64', '9.9.9');
+  assert.deepEqual(D.findCli({ findIn: dir }, { platform: 'linux', key: 'linux-x64' }), { file: linux, kind: 'exe' });
+  // Inside the wrapper's own node_modules: used too.
+  const win = plat('win32-x64', '9.9.9', path.join(wrapper, 'node_modules', '@anthropic-ai'));
+  assert.deepEqual(D.findCli({ findIn: dir }, { platform: 'win32', key: 'win32-x64' }), { file: win, kind: 'exe' });
+  // --claude-code still wins over everything.
+  assert.equal(D.findCli({ file: bin, findIn: dir }, { platform: 'linux', key: 'linux-x64' }).file, bin);
+});
+
+test('13.7 (Windows, live; first CI run): a parent PowerShell 7 module path does not reach Windows PowerShell, so Get-FileHash still loads in the blocks', { skip: process.platform === 'win32' ? false : 'Windows only' }, async (t) => {
+  const { pathToFileURL } = require('node:url');
+  const D = await import(pathToFileURL(path.join(REPO_TOP, 'scripts', 'lib', 'dev-run.mjs')).href);
+  const shells = D.findShells();
+  if (!shells.powershell) { t.skip(shells.why.powershell); return; }
+  // A stand-in for PowerShell 7's own Utility module, first on the path, as a pwsh parent leaves it.
+  const dir = makeTempDir('psmodulepath');
+  made.push(dir);
+  const mod = path.join(dir, 'Microsoft.PowerShell.Utility');
+  fs.mkdirSync(mod);
+  fs.writeFileSync(path.join(mod, 'Microsoft.PowerShell.Utility.psd1'), "@{\nModuleVersion='7.0.0.0'\nCompatiblePSEditions=@('Core')\nCmdletsToExport='Get-FileHash'\nNestedModules='Microsoft.PowerShell.Commands.Utility.dll'\n}\n");
+  const cmd = "(Get-FileHash -LiteralPath (Join-Path $env:SystemRoot 'win.ini')).Algorithm";
+  const sys = process.env.SystemRoot || 'C:\\Windows';
+  const planted = [dir, path.join(sys, 'System32', 'WindowsPowerShell', 'v1.0', 'Modules')].join(';');
+  const run = D.makeRun('install-proof-test', 'psmodulepath');
+  const saved = Object.keys(process.env).filter((k) => k.toUpperCase() === 'PSMODULEPATH').map((k) => [k, process.env[k]]);
+  try {
+    // The control: with the planted path kept, Windows PowerShell cannot find Get-FileHash.
+    const kept = { ...D.runEnv(run), PSModulePath: planted };
+    const bad = D.runShellCommand('powershell', shells.powershell, cmd, { env: kept, cwd: run.project });
+    assert.ok(!/SHA256/.test(String(bad.stdout)), 'the stand-in breaks Get-FileHash when it reaches the child');
+    for (const [k] of saved) delete process.env[k];
+    process.env.PSModulePath = planted;
+    const env = D.runEnv(run);
+    assert.ok(!Object.keys(env).some((k) => k.toUpperCase() === 'PSMODULEPATH'), 'dropped from the child environment');
+    const good = D.runShellCommand('powershell', shells.powershell, cmd, { env, cwd: run.project });
+    assert.equal(String(good.stdout).trim(), 'SHA256', String(good.stderr));
+  } finally {
+    delete process.env.PSModulePath;
+    for (const [k, v] of saved) process.env[k] = v;
+    D.removeRun(run);
+  }
+});
+
+test('13.7: the child environment drops every git variable, shell start files, PowerShell\'s module path, the SSH agent and anything named like a credential', async () => {
   const { pathToFileURL } = require('node:url');
   const D = await import(pathToFileURL(path.join(REPO_TOP, 'scripts', 'lib', 'dev-run.mjs')).href);
   const planted = {
     GIT_DIR: 'x', GIT_WORK_TREE: 'x', GIT_INDEX_FILE: 'x', GIT_OBJECT_DIRECTORY: 'x', GIT_CONFIG_PARAMETERS: 'x', GIT_CONFIG_COUNT: '1',
     GIT_CONFIG_KEY_0: 'x', GIT_CONFIG_VALUE_0: 'x', GIT_ASKPASS: 'x', GIT_SSH_COMMAND: 'x', BASH_ENV: 'x', ENV: 'x', NPM_TOKEN: 'x',
     NODE_AUTH_TOKEN: 'x', SSH_AUTH_SOCK: 'x', ACTIONS_RUNTIME_TOKEN: 'x', ACTIONS_ID_TOKEN_REQUEST_URL: 'x', MY_SERVICE_SECRET: 'x',
-    DB_PASSWORD: 'x', SOME_CREDENTIALS: 'x', VENDOR_API_KEY: 'x', KEEP_ME: 'y',
+    DB_PASSWORD: 'x', SOME_CREDENTIALS: 'x', VENDOR_API_KEY: 'x', PSModulePath: 'x', psmodulepath: 'x', KEEP_ME: 'y',
   };
   const out = D.cleanBaseEnv(planted);
   assert.deepEqual(Object.keys(out), ['KEEP_ME']);
