@@ -6,6 +6,9 @@
     "name": "Project maintainers"
   },
   "license": "MIT",
+  "engines": {
+    "claude-code": ">=2.1.329"
+  },
   "keywords": ["search", "notes", "docs", "mcp", "local"],
   "userConfig": {
     "projects": {

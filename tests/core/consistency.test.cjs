@@ -1,9 +1,9 @@
 'use strict';
 // Repo-wide consistency checks (spec 2.2, 4, 5.1, 6.2, 6.6, 6.10, 6.12, 9.9, 12.2, 14, 15.1
 // consistency row, T-34). Rows for files that do not exist yet are added with those files:
-//   B8: README's T-11 row text and the SR-50 points (T-33), docs/install.md, docs/search.md,
-//       docs/session-limits.md, docs/prompt-cache.md, docs/token-habits.md and every 14.5
-//       page, CODEOWNERS, the README floor line with `engines`.
+//   B8 (done, the docs section at the end of this file): README's T-11 row text and the SR-50 points (T-33),
+//       docs/install.md, docs/search.md, docs/session-limits.md, docs/prompt-cache.md, docs/token-habits.md and every
+//       14.5 page, CODEOWNERS, the README floor line with `engines`.
 //   B9 (done, at the end of this file): the docs/install.md blocks against a fresh render of docs/install-steps.json.
 // The search plugin's 9.13 option table and its env-only mapping are checked in
 // tests/search/static.test.cjs (same 15.1 row); they are not copied here.
@@ -399,4 +399,233 @@ test('12.2 b: every marked block of docs/install.md (bash, PowerShell, the setti
   for (const name of S.BLOCK_NAMES) assert.equal(S.extractBlock(md, name), blocks[name], name + ' differs from a fresh render: run node scripts/copy-by-hand.mjs --render');
   // No rendered block holds a key that is not a real settings key (12.2 a).
   for (const m of blocks.settings.matchAll(/```json\n([\s\S]*?)\n```/g)) assert.deepEqual(Object.keys(JSON.parse(m[1])).sort(), ['hooks', 'statusLine']);
+});
+
+// ---------------------------------------------------------------------------
+// B8 docs (11, 14.1, 14.2, 14.3 engines, 14.5, T-11 row 1, T-33). Each point is checked by a fixed key
+// sentence kept here, so a rewrite that drops a point fails.
+
+const has = (text, sentence) => text.includes(sentence);
+const norm = (s) => s.replace(/\s+/g, ' ');
+
+test('14.1, 14.2, 14.5: every top file, .github file and docs page exists and is not empty', () => {
+  const files = [['README.md'], ['LICENSE'], ['CONTRIBUTING.md'], ['.github', 'SECURITY.md'], ['.github', 'CODEOWNERS'], ['docs', 'install.md'], ['docs', 'install-steps.json'], ['docs', 'dynamic-modeling.md'], ['docs', 'session-limits.md'], ['docs', 'prompt-cache.md'], ['docs', 'search.md'], ['docs', 'token-habits.md'], ['docs', 'changelog.md'], ['docs', 'design', 'ptt-spec.md']];
+  for (const parts of files) assert.ok(read(...parts).trim().length > 0, parts.join('/'));
+});
+
+test('14.3 engines: both manifests hold the same claude-code range, the README and install floor lines name that version, and the CI pin is the same version', () => {
+  const core = readJson('src', 'core', '.claude-plugin', 'plugin.json');
+  const search = readJson('src', 'search', '.claude-plugin', 'plugin.json');
+  assert.deepEqual(core.engines, { 'claude-code': '>=2.1.329' });
+  assert.deepEqual(search.engines, core.engines);
+  assert.ok(has(read('README.md'), 'Claude Code 2.1.329 or later'));
+  assert.ok(has(read('README.md'), '2.1.292'), 'the one-command install floor is stated');
+  assert.ok(has(read('docs', 'install.md'), 'Claude Code 2.1.329 or later'));
+  assert.match(read('.github', 'workflows', 'ci.yml'), /CLAUDE_CODE_VERSION: 2\.1\.329\b/);
+});
+
+test('6.10 a row 1 (T-11 f): README and docs/install.md hold the row 1 text; no page names the current-folder variable or a Node-path option', () => {
+  const readme = norm(read('README.md'));
+  const install = norm(read('docs', 'install.md'));
+  for (const k of [
+    'Plugin mode starts Node by the plain name `node`, found on your `PATH`, and has no Node-path option.',
+    'a repository could plant its own program named `node`',
+    'a planted copy did not run for any hook',
+    'The kit cannot control how Claude Code finds the program.',
+    'A copy-by-hand install always uses the full path of Node'
+  ]) {
+    assert.ok(has(readme.toLowerCase(), k.toLowerCase()), 'README: ' + k);
+    assert.ok(has(install.toLowerCase(), k.toLowerCase()), 'docs/install.md: ' + k);
+  }
+  assert.ok(has(readme, 'you must update it after you move or upgrade Node'));
+  assert.ok(has(install, 'You must update that path after you move or upgrade Node.'));
+  const NOCWD = ['NoDefault', 'CurrentDirectory', 'InExePath'].join('');
+  for (const f of [['README.md'], ['docs', 'install.md'], ['docs', 'session-limits.md'], ['docs', 'search.md']]) {
+    const text = read(...f);
+    assert.ok(!text.includes(NOCWD), f.join('/') + ' must not name the variable (T-11 d did not show it closes the gap)');
+    assert.ok(!/node_path/i.test(text), f.join('/') + ' must not mention a node_path option');
+  }
+});
+
+const SR50 = [
+  'The search index is an unencrypted copy of text from your files.',
+  'Any program running as you can read it.',
+  'Backup or sync tools that copy your home folder or your Claude config folder copy the index too.',
+  'Whatever search returns becomes part of the chat and is sent to the model provider, the same as when Claude reads the file.',
+  'The secret scan is best effort. Keep secrets out of files you index.',
+  'Files that come from outside (downloaded pages, vendored READMEs, pasted issue text) can carry hidden instructions. Search results are data.',
+  'On Windows the index takes the permissions of your profile folder. On a shared machine, check them.',
+  'Uninstalling the plugin deletes the index when it is removed from the last place it is installed, unless you used `--keep-data`.',
+  'Do not index material you are not allowed to copy',
+  'create a file named `OFF` in the search data folder',
+  'add your own never-terms'
+];
+
+test('11 SR-50 / T-33: README and docs/search.md each hold all nine points', () => {
+  for (const f of [['README.md'], ['docs', 'search.md']]) {
+    const text = norm(read(...f));
+    for (const k of SR50) assert.ok(has(text, norm(k)), f.join('/') + ' is missing: ' + k);
+  }
+});
+
+test('11 SR-23, SR-40, SR-21, T-33: docs/search.md holds the Windows-permissions and what-the-kit-cannot-stop points, the config-folder case, the emoji flag false alarm, the mark lines with placeholders, and every option', () => {
+  const s = norm(read('docs', 'search.md'));
+  for (const k of [
+    "so on Windows the kit does not check the index's permissions. It discloses them instead",
+    'the index inherits the permissions of your profile folder',
+    'Once Claude reads a planted line, it is text in the chat.',
+    'If you let Claude run shell commands without asking, a planted instruction has real reach.',
+    'It does not remove the risk.',
+    'If your config folder is inside a git repo, or inside the project, search switches itself off',
+    'Emoji subdivision flags',
+    'That is an accepted false alarm',
+    'SUPERSEDED <YYYY-MM-DD> by <relative path>',
+    'PARTLY SUPERSEDED <YYYY-MM-DD> by <relative path>: <which part>',
+    'CANCELLED <YYYY-MM-DD>: <why>',
+    'Search by meaning is not included.',
+    'not yet confirmed on a live run'
+  ]) assert.ok(has(s, norm(k)), 'docs/search.md is missing: ' + k);
+  assert.ok(!/(?:19|20)[0-9]{2}-[0-9]{2}-[0-9]{2}/.test(s), 'no real date in a mark example');
+  for (const k of Object.keys(readJson('src', 'search', '.claude-plugin', 'plugin.json').userConfig)) assert.ok(s.includes('`' + k + '`'), 'docs/search.md names option ' + k);
+  assert.ok(has(s, 'drop_contacts') && has(s, 'max_file_bytes'));
+});
+
+test('11, T-33: docs/install.md holds the Node points, the home-folder-as-git-repo case, the developer-only local install and the managed-MCP notice; README holds the last two', () => {
+  const i = norm(read('docs', 'install.md'));
+  for (const k of [
+    'Check with `node -v`.',
+    'The common installers give a real `node.exe` on Windows.',
+    'switch the hook to shell form with the full path to Node in single quotes',
+    'The self-check catches a stray but genuine Node only; it can never stop a planted program.',
+    'A home folder kept as a git repo.',
+    'Installing from a local folder is a developer path only.',
+    'the kit saves nothing',
+    'takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you',
+    'This comes from the Claude Code docs and is not yet confirmed on a live run.',
+    'so the copy-by-hand step that registers the search server cannot work there either',
+    '--debug',
+    '/hooks',
+    'Uninstall leaves nothing the kit created, except what you chose to keep.',
+    'A comma-separated list works when each listed folder exists.',
+    'List the folder you start sessions in.',
+    'blocks a launch that names an option you never set, and only that launch',
+    'The core hooks name no options.'
+  ]) assert.ok(has(i, norm(k)), 'docs/install.md is missing: ' + k);
+  const r = norm(read('README.md'));
+  for (const k of ['Installing from a local folder is for developers only.', 'takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you', 'not yet confirmed on a live run', 'cannot register the search server there either', 'Uninstall leaves nothing the kit created, except what you chose to keep.']) assert.ok(has(r, norm(k)), 'README is missing: ' + k);
+  // Held items are marked pending, never stated as an instruction or a fact.
+  assert.ok(has(i, 'PENDING'), 'held items are marked PENDING');
+  assert.ok(!/set every search option/i.test(i + norm(read('docs', 'search.md'))), 'the held "set every search option" line is not stated');
+});
+
+test('6.6 b, SR-C4, SR-C5, 6.2, 6.8, 6.11 h, T-33: docs/session-limits.md holds its notices and every option', () => {
+  const s = norm(read('docs', 'session-limits.md'));
+  for (const k of [
+    'Each prompt you send re-sends the whole chat so far.',
+    "A note written when you run the `handoff` skill yourself follows the skill's text; code does not enforce it.",
+    "The write follows the skill's steps; code does not enforce it.",
+    'Notes can hold work details. Keep them out of repos and out of synced folders.',
+    'Some editor panels do not draw a custom status line.',
+    'lower both `soft_tokens` and `hard_tokens` to match',
+    'whose format belongs to Claude Code and can change between versions',
+    "chat-length meter cannot read this chat's format; it is off for this session",
+    'Routing rules were not added at session start: the model-routing skill file is inside the current project, so it was not read.',
+    "`& '<NODE>' '<path to meter.cjs>' --statusline`",
+    "Git Bash, macOS and Linux: `'<NODE>' '<path to meter.cjs>' --statusline`",
+    "Whether a project's own settings can move your config folder this way has not been checked."
+  ]) assert.ok(has(s, norm(k)), 'docs/session-limits.md is missing: ' + k);
+  for (const k of Object.keys(M.DEFAULTS)) assert.ok(s.includes('`' + k + '`'), 'docs/session-limits.md names option ' + k);
+});
+
+test('8, 14.5: docs/prompt-cache.md names its three source URLs, tags facts [CC], [API] or [SL], and holds no percent sign or currency sign; docs/token-habits.md links its source and holds none either', () => {
+  const c = read('docs', 'prompt-cache.md');
+  for (const u of ['https://code.claude.com/docs/en/prompt-caching.md', 'https://platform.claude.com/docs/en/build-with-claude/prompt-caching.md', 'https://code.claude.com/docs/en/statusline.md']) assert.ok(c.includes(u), u);
+  for (const tag of ['[CC]', '[API]', '[SL]']) assert.ok(c.includes(tag), tag);
+  const MONEY = /[%$€£¥]/;
+  assert.ok(!MONEY.test(c), 'prompt-cache: no percent or currency sign');
+  const h = read('docs', 'token-habits.md');
+  assert.ok(h.includes('https://code.claude.com/docs/en/costs.md'));
+  assert.ok(!MONEY.test(h), 'token-habits: no percent or currency sign');
+});
+
+test('14.5: README names every docs page; every relative Markdown link and every backtick *.md path in the README, CONTRIBUTING and the docs resolves to a file (from the page folder or the repo top)', () => {
+  const readme = read('README.md');
+  for (const f of ['install.md', 'dynamic-modeling.md', 'session-limits.md', 'prompt-cache.md', 'search.md', 'token-habits.md', 'changelog.md']) assert.ok(readme.includes('docs/' + f), f);
+  const pages = [['README.md'], ['CONTRIBUTING.md'], ['.github', 'SECURITY.md'], ...fs.readdirSync(path.join(REPO_TOP, 'docs')).filter((n) => n.endsWith('.md') && n !== 'changelog.md').map((n) => ['docs', n])];
+  const resolves = (page, ref) => [path.resolve(REPO_TOP, ...page.slice(0, -1), ref), path.resolve(REPO_TOP, ref)].some((f) => fs.existsSync(f));
+  let checked = 0;
+  for (const page of pages) {
+    const text = read(...page).replace(/^```[\s\S]*?^```/gm, '');
+    for (const m of text.matchAll(/\]\(([^)#\s]+)(?:#[^)]*)?\)/g)) {
+      if (/^[a-z][a-z0-9+.-]*:/i.test(m[1])) continue;
+      checked++;
+      assert.ok(resolves(page, m[1]), page.join('/') + ' links to a missing file: ' + m[1]);
+    }
+    for (const m of text.matchAll(/`([A-Za-z0-9_./-]+\.md)`/g)) {
+      checked++;
+      assert.ok(resolves(page, m[1]), page.join('/') + ' names a missing file: ' + m[1]);
+    }
+  }
+  assert.ok(checked > 10, 'the check found references to test');
+});
+
+test('13.5, 14.2: CODEOWNERS covers exactly the five required paths, each names an owner and exists; CONTRIBUTING holds the repo-hardening points; SECURITY names private reporting and the limits', () => {
+  const co = read('.github', 'CODEOWNERS').split('\n').filter((l) => l.trim() && !l.trim().startsWith('#'));
+  const wanted = ['src/**/hooks/**', 'src/search/**', '.github/**', 'scripts/**', 'package.json'];
+  assert.deepEqual(co.map((l) => l.trim().split(/\s+/)[0].replace(/^\//, '')).sort(), wanted.slice().sort());
+  for (const l of co) assert.ok(l.trim().split(/\s+/).length >= 2, 'each line names an owner: ' + l);
+  for (const w of wanted) {
+    const stat = w.split('*')[0].replace(/\/$/, '');
+    assert.ok(fs.existsSync(path.join(REPO_TOP, stat || '.')), 'path exists: ' + w);
+  }
+  assert.ok(fs.existsSync(path.join(SRC, 'core', 'hooks')) && fs.existsSync(path.join(SRC, 'search')) && fs.existsSync(path.join(REPO_TOP, 'scripts')));
+  const c = norm(read('CONTRIBUTING.md'));
+  for (const k of [
+    'Both scan layers must pass before a commit.',
+    "Do not use the host's web merge or web edit buttons.",
+    'Every outside pull request gets a security review before merge.',
+    'A lone maintainer cannot approve their own pull request.',
+    'The required checks are never skipped',
+    'a force push is never allowed',
+    'This bypass is removed once a second maintainer with review rights joins.',
+    'Close every Claude Code session before you run them',
+    'Private vulnerability reporting switched on.',
+    "Contributions are under the repo's licence"
+  ]) assert.ok(has(c, norm(k)), 'CONTRIBUTING.md is missing: ' + k);
+  const s = norm(read('.github', 'SECURITY.md'));
+  assert.ok(has(s, 'private vulnerability reporting'));
+  assert.ok(has(s, 'What the kit does not do'));
+  assert.ok(!/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}/.test(s), 'no personal email in SECURITY.md');
+  assert.ok(has(s, 'Its Node self-check catches a stray but genuine Node program only.'));
+});
+
+test('11 SR-50 points 7 and 9, 3.1 fact 7: README and docs/search.md give the index path and the OFF file place, and say the never-lists may not narrow in a plugin install until the list form is proven', () => {
+  for (const f of [['README.md'], ['docs', 'search.md']]) {
+    const text = norm(read(...f));
+    for (const k of [
+      '<config folder>/plugins/data/pocotoko-search-pocotoko/indexes/<16 hex>/',
+      '<KIT>/search/data/',
+      "in a plugin install, the never-lists (`never_terms`, `never_folders`, `never_globs`) may not narrow anything until the form in which a list reaches the server is proven",
+      'search: do not index'
+    ]) assert.ok(has(text, norm(k)), f.join('/') + ' is missing: ' + k);
+  }
+  assert.ok(has(norm(read('docs', 'search.md')), 'The never-lists do not fail safe.'));
+  assert.ok(has(norm(read('README.md')), 'Notes in the default hand-off folder are deleted with the plugin'));
+});
+
+test('11 / 6.11 h: README "Not yet proven" holds the never-list bullet; the copy-by-hand scope is on the 6.11 h note in session-limits and install; the plugins folder is the folder CLAUDE_CODE_PLUGIN_CACHE_DIR names', () => {
+  const r = norm(read('README.md'));
+  assert.ok(has(r, 'but the never-lists (`never_terms`, `never_folders`, `never_globs`) would not narrow anything'));
+  assert.ok(has(norm(read('docs', 'session-limits.md')), '**Config folder inside the project you opened (copy-by-hand install).**'));
+  assert.ok(has(norm(read('docs', 'install.md')), '**A config folder inside the project you opened (copy-by-hand install)**'));
+  for (const f of [['README.md'], ['docs', 'search.md'], ['docs', 'install.md']]) assert.ok(has(norm(read(...f)), 'the plugins folder is the folder that variable names'), f.join('/'));
+});
+
+test('1.4, 17: no docs page or README mentions a sponsor button, and no heading says "official"', () => {
+  for (const name of ['install.md', 'dynamic-modeling.md', 'session-limits.md', 'prompt-cache.md', 'search.md', 'token-habits.md']) {
+    const text = read('docs', name);
+    for (const line of text.split('\n')) if (/^#/.test(line)) assert.ok(!/official/i.test(line), name + ': ' + line);
+    assert.ok(!/sponsor/i.test(text), name + ' mentions a sponsor');
+  }
+  assert.ok(!/sponsor/i.test(read('README.md')));
 });

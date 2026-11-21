@@ -6,6 +6,9 @@
     "name": "Project maintainers"
   },
   "license": "MIT",
+  "engines": {
+    "claude-code": ">=2.1.329"
+  },
   "keywords": ["model-routing", "context", "meter", "handoff", "session"],
   "userConfig": {
     "soft_tokens": {
