@@ -1002,7 +1002,7 @@ The fourth end gate found one test gap, one low test finding and three review ni
 
 ### README: systems and Node lines now run
 
-The README said only Windows with Node 24 had been run, and listed macOS, Linux, Node 22 and Node 26 under "Not yet proven". That is out of date: CI run `44899293415` on `3c331e5` was green on all 9 jobs (Windows, macOS and Ubuntu, each on Node 22, 24 and 26), with the tests, both scrub layers, `validate --strict`, the sandbox check and the copy-by-hand check all at 0 failed.
+The README said only Windows with Node 24 had been run, and listed macOS, Linux, Node 22 and Node 26 under "Not yet proven". That is out of date: CI run `44899293415` on `3c331e5` was green on all 9 jobs (Windows, macOS and Ubuntu, each on Node 22, 24 and 26), with the tests, the public scrub layer, `validate --strict`, the sandbox check and the copy-by-hand check all at 0 failed. CI does not run the private scrub layer; that one runs locally before each commit.
 
 - **Changed:** `README.md`. The requirements line now says the tests and checks have run on all three systems on Node 22, 24 and 26, and the "Not yet proven" item for those systems is removed. The other items in that list are unchanged and still open.
 - **Not changed:** past entries here are history. Nothing under `src/` and no code changed.
