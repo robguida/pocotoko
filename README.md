@@ -63,7 +63,7 @@ If you do not want the plugin system, `docs/install.md` has the steps for Git Ba
 
 - Plugin mode starts Node by the plain name `node`, found on your `PATH`, and has no Node-path option.
 - On Windows a repository could plant its own program named `node`, so how the program is found matters.
-- In the checks made for this kit (Claude Code 2.1.329), a planted copy did not run for any hook. That was seen for hooks, not yet for the search server.
+- In the checks made for this kit (Claude Code 2.1.329), a planted copy did not run for any hook. It did not run for a plugin's MCP server started with `node` either.
 - The kit cannot control how Claude Code finds the program.
 - A copy-by-hand install always uses the full path of Node, and you must update it after you move or upgrade Node.
 
@@ -71,7 +71,7 @@ More in `docs/install.md`.
 
 ## Organisation-managed MCP settings
 
-If your organisation's managed MCP configuration takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you. This comes from the Claude Code docs and is not yet confirmed on a live run. The core plugin has only hooks and skills, so it is not affected. On a machine like that, the command that registers a server (`claude mcp add --scope user`) was refused when tried, so a copy-by-hand install cannot register the search server there either.
+If your organisation's managed MCP configuration takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you. This comes from the Claude Code docs, and two live runs showed it: with such a file in place no plugin MCP server was listed or started; with the file moved aside, they all were. The core plugin has only hooks and skills, so it is not affected. On a machine like that, the command that registers a server (`claude mcp add --scope user`) was refused when tried, so a copy-by-hand install cannot register the search server there either.
 
 ## Before you turn search on
 
@@ -85,7 +85,7 @@ Search is off until you list a project folder in the `projects` option. These po
 6. On Windows the index takes the permissions of your profile folder. On a shared machine, check them.
 7. Uninstalling the plugin deletes the index when it is removed from the last place it is installed, unless you used `--keep-data`. In a few cases Claude Code keeps the folder. `docs/search.md` says where it is and how to delete it by hand.
 8. Do not index material you are not allowed to copy, such as some client or regulated data. A local copy can still break a policy.
-9. To switch search off for one project, remove its folder from the `projects` option. To switch it off everywhere, create a file named `OFF` in the search data folder: `pocotoko-search-pocotoko/` inside the plugins data folder for a plugin install, `<KIT>/search/data/` for copy-by-hand. To skip more, add your own never-terms. **Caveat:** in a plugin install, the never-lists (`never_terms`, `never_folders`, `never_globs`) may not narrow anything until the form in which a list reaches the server is proven. Until then, keep sensitive files out of enabled projects, or put the line `search: do not index` in the first 15 lines of a file. A `search-config.json` array in a copy-by-hand install is not affected. `docs/search.md` has the details.
+9. To switch search off for one project, remove its folder from the `projects` option. To switch it off everywhere, create a file named `OFF` in the search data folder: `pocotoko-search-pocotoko/` inside the plugins data folder for a plugin install, `<KIT>/search/data/` for copy-by-hand. To skip more, add your own never-terms. **Caveat:** in a plugin install, the never-lists (`never_terms`, `never_folders`, `never_globs`) may not narrow anything when they are set through the interactive `/plugin configure` form, or when you change only some options with `claude plugin configure`, until both are proven. In the checks, a list stored as one comma-separated line or as JSON-array text (the forms `claude plugin configure --values-stdin` stores) reached a plugin's server as stored, and the kit reads such a list entry by entry. Until both are proven, keep sensitive files out of enabled projects, or put the line `search: do not index` in the first 15 lines of a file. A `search-config.json` array in a copy-by-hand install is not affected. `docs/search.md` has the details.
 
 ## Uninstall
 
@@ -103,11 +103,13 @@ Remove the status line entry first if you added one. Copy-by-hand has its own un
 
 These are stated as open, not as fact.
 
-- Claude Code starting the search server itself, on a machine with no organisation-managed MCP file. How options reach the server, what `CLAUDE_PROJECT_DIR` holds for it, and whether an option you never set stops it from starting have not been seen live.
+- Claude Code starting the real search server itself. The live checks used small stand-in servers. They showed how options reach a plugin's server, that such a server is given the folder the session started in, and that a planted `node` program did not run. In the checks, a stand-in server's never-set text option with a default got that default; for search that would apply to `matching` and `word_families`. Whether an option with no default that you never set (`projects`, `extra_types`, `never_folders`, `never_globs`, `never_terms`, `synonyms`) stops it from starting has not been seen.
+- Whether a never-set `drop_contacts` or `max_file_bytes` (options with a default that are not text) stops the search server from starting, and what value it then gets, has not been seen.
 - The install lines above with a real host repository. The `<owner>/<repo>` shorthand has not been tried.
 - A run on macOS and Linux, and on Node 22 and 26. Only Windows with Node 24 has been run so far.
-- Whether a planted `node` program could run when Claude Code starts the search server. It was not seen for the server.
-- In a plugin install, the form in which a list option reaches the server. If it differs, `projects` fails closed (search stays off), but the never-lists (`never_terms`, `never_folders`, `never_globs`) would not narrow anything. Until it is proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
+- In a plugin install, the form a list option takes at the server when you set it through the interactive `/plugin configure` form. In the checks, a list stored as one comma-separated line or as JSON-array text reached a plugin's server as stored. If the interactive form stores it differently, `projects` fails closed (search stays off), but the never-lists (`never_terms`, `never_folders`, `never_globs`) would not narrow anything. Until this and the next item are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
+- In a plugin install, when you change some options with `claude plugin configure`, whether the options you did not name are kept has not been seen. If they were dropped, a never-list could stop narrowing. Until this and the interactive form are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
+- Whether the plugin cache folder variable (`CLAUDE_CODE_PLUGIN_CACHE_DIR`) reaches the search server when the cache is really moved to another place. In the checks it reached a plugin's server unchanged, but it was set to the default place there.
 - A skill loading inside a live session, and whether a project's own settings can move your config folder.
 
 ## Docs

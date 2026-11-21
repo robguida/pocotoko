@@ -483,7 +483,7 @@ test('11 SR-23, SR-40, SR-21, T-33: docs/search.md holds the Windows-permissions
     'PARTLY SUPERSEDED <YYYY-MM-DD> by <relative path>: <which part>',
     'CANCELLED <YYYY-MM-DD>: <why>',
     'Search by meaning is not included.',
-    'not yet confirmed on a live run'
+    'This comes from the Claude Code docs, and two live runs showed it: with such a file in place no plugin MCP server was listed or started'
   ]) assert.ok(has(s, norm(k)), 'docs/search.md is missing: ' + k);
   assert.ok(!/(?:19|20)[0-9]{2}-[0-9]{2}-[0-9]{2}/.test(s), 'no real date in a mark example');
   for (const k of Object.keys(readJson('src', 'search', '.claude-plugin', 'plugin.json').userConfig)) assert.ok(s.includes('`' + k + '`'), 'docs/search.md names option ' + k);
@@ -501,18 +501,19 @@ test('11, T-33: docs/install.md holds the Node points, the home-folder-as-git-re
     'Installing from a local folder is a developer path only.',
     'the kit saves nothing',
     'takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you',
-    'This comes from the Claude Code docs and is not yet confirmed on a live run.',
+    'This comes from the Claude Code docs, and two live runs showed it: with such a file in place no plugin MCP server was listed or started',
     'so the copy-by-hand step that registers the search server cannot work there either',
     '--debug',
     '/hooks',
     'Uninstall leaves nothing the kit created, except what you chose to keep.',
     'A comma-separated list works when each listed folder exists.',
     'List the folder you start sessions in.',
-    'blocks a launch that names an option you never set, and only that launch',
+    'blocks a hook launch that names an option you never set, and only that launch',
+    "a stand-in server's never-set text option with a default got that default",
     'The core hooks name no options.'
   ]) assert.ok(has(i, norm(k)), 'docs/install.md is missing: ' + k);
   const r = norm(read('README.md'));
-  for (const k of ['Installing from a local folder is for developers only.', 'takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you', 'not yet confirmed on a live run', 'cannot register the search server there either', 'Uninstall leaves nothing the kit created, except what you chose to keep.']) assert.ok(has(r, norm(k)), 'README is missing: ' + k);
+  for (const k of ['Installing from a local folder is for developers only.', 'takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you', 'This comes from the Claude Code docs, and two live runs showed it', 'cannot register the search server there either', 'Uninstall leaves nothing the kit created, except what you chose to keep.']) assert.ok(has(r, norm(k)), 'README is missing: ' + k);
   // Held items are marked pending, never stated as an instruction or a fact.
   assert.ok(has(i, 'PENDING'), 'held items are marked PENDING');
   assert.ok(!/set every search option/i.test(i + norm(read('docs', 'search.md'))), 'the held "set every search option" line is not stated');
@@ -599,13 +600,106 @@ test('13.5, 14.2: CODEOWNERS covers exactly the five required paths, each names 
   assert.ok(has(s, 'Its Node self-check catches a stray but genuine Node program only.'));
 });
 
-test('11 SR-50 points 7 and 9, 3.1 fact 7: README and docs/search.md give the index path and the OFF file place, and say the never-lists may not narrow in a plugin install until the list form is proven', () => {
+// The user pages the --values-stdin guard reads: README.md, CONTRIBUTING.md and docs/*.md, except
+// docs/changelog.md (history) and the spec under docs/design/ (not a .md file at the docs top).
+function valuesStdinPages() {
+  const docsDir = path.join(REPO_TOP, 'docs');
+  return [['README.md'], ['CONTRIBUTING.md']].concat(fs.readdirSync(docsDir).filter((n) => n.endsWith('.md') && n !== 'changelog.md').sort().map((n) => ['docs', n]));
+}
+
+// Each line on its own, split again after a sentence end (. ! or ? then white space). Simple on
+// purpose: an odd split only makes more, shorter sentences, and each is judged alone.
+function sentencesOf(text) {
+  const out = [];
+  for (const line of String(text).split(/\r?\n/)) {
+    for (const s of line.split(/(?<=[.!?])\s+/)) if (s.trim()) out.push(s.trim());
+  }
+  return out;
+}
+
+const IMPERATIVE_VERB = '(?:set|use|run|give|pass|call|configure|pipe|type|enter)\\b';
+const IMPERATIVE = new RegExp('^' + IMPERATIVE_VERB + '|(?:,|;|\\bthen)\\s+' + IMPERATIVE_VERB, 'i');
+// A modal or purpose form ahead of the command: "you can / may / should" or "to set / change /
+// enable", anywhere before --values-stdin in the sentence.
+const MODAL_OR_PURPOSE = /\b(?:you\s+(?:can|may|should)|to\s+(?:set|change|enable))\b[\s\S]*--values-stdin/i;
+const VALUES_STDIN_FACT = /\breached\b|\bhas not been seen\b/i;
+
+// A sentence naming --values-stdin passes only when it is not an instruction and it is a fact
+// sentence ("reached", "has not been seen") or carries PENDING as a whole word in capitals.
+// "stores" or "stored" alone is not enough. An instruction: it starts with set / use / run /
+// give / pass / call / configure / pipe / type / enter (after list marks, emphasis and a PENDING
+// label), or holds one of them after a comma, semicolon or "then", or holds "you can / may /
+// should" or "to set / change / enable" before the command; any case.
+// Returns the offending sentences.
+function valuesStdinViolations(text) {
+  const bad = [];
+  for (const s of sentencesOf(text)) {
+    if (!/--values-stdin/i.test(s)) continue;
+    const bare = s.replace(/^[^A-Za-z]+/, '').replace(/^PENDING\b[^A-Za-z]*/, '');
+    const instruction = IMPERATIVE.test(bare) || MODAL_OR_PURPOSE.test(s);
+    const ok = !instruction && (VALUES_STDIN_FACT.test(s) || /\bPENDING\b/.test(s));
+    if (!ok) bad.push('names --values-stdin outside a PENDING or fact sentence: ' + s.slice(0, 80));
+  }
+  return bad;
+}
+
+test('9.13 / fix round 3: the --values-stdin guard judges each sentence: an instruction fails in any case and inside a long line, and the real fact sentences in the docs pass', () => {
+  const fails = [
+    'Set the never-lists with `claude plugin configure --values-stdin`.',
+    "A list stored as one comma-separated line reached a plugin's server as stored. Set the never-lists with `claude plugin configure --values-stdin`. The other keys are stored too.",
+    'Set the never-lists with `claude plugin configure --values-stdin`, which stores them as typed, so they reached the server.',
+    'Depending on your setup, set the never-lists with `claude plugin configure --values-stdin`.',
+    'use `claude plugin configure --values-stdin` to set them',
+    'USE `CLAUDE PLUGIN CONFIGURE --VALUES-STDIN` TO SET THEM',
+    'SET THEM WITH `CLAUDE PLUGIN CONFIGURE --VALUES-STDIN`.',
+    'If a list is stored, then run `claude plugin configure --values-stdin` again.',
+    '- **PENDING:** set the never-lists with `--values-stdin`.',
+    'pending: a call with `--values-stdin` naming some keys.',
+    'The settings command `claude plugin configure --values-stdin` stores such a line as it was typed.',
+    'You can set the never-lists with `claude plugin configure --values-stdin`, which stores them as typed.',
+    'To set the lists, pipe JSON-array text to `claude plugin configure --values-stdin`; it stores the line as typed.',
+    'You should configure the lists with `claude plugin configure --values-stdin`, so they reached the server.',
+    'Enter the lists through `claude plugin configure --values-stdin`; it stores them as typed.'
+  ];
+  const wrong = [];
+  for (const s of fails) if (valuesStdinViolations(s).length !== 1) wrong.push('should fail once: ' + s);
+  const passes = [
+    '- **PENDING:** a call with `--values-stdin` naming some keys.',
+    'A list stored by `--values-stdin` reached the server as stored.',
+    'Whether `--values-stdin` keeps the other keys has not been seen.'
+  ];
+  for (const s of passes) if (valuesStdinViolations(s).length !== 0) wrong.push('should pass: ' + s);
+  // The real sentences in the user pages that name --values-stdin are fact sentences and pass.
+  const real = [];
+  for (const f of valuesStdinPages()) for (const s of sentencesOf(read(...f))) if (/--values-stdin/i.test(s)) real.push([f.join('/'), s]);
+  assert.ok(real.length >= 2, 'the user pages hold the --values-stdin fact sentences');
+  for (const [f, s] of real) if (valuesStdinViolations(s).length !== 0) wrong.push(f + ': real sentence fails: ' + s.slice(0, 80));
+  assert.deepEqual(wrong, []);
+});
+
+test('3.1 fact 7 still open (iv): README, docs/search.md and docs/install.md each hold the partial-call bullet in "Not yet proven" (PENDING on the two docs pages)', () => {
+  const key = norm('when you change some options with `claude plugin configure`, whether the options you did not name are kept has not been seen. If they were dropped, a never-list could stop narrowing.');
+  const missing = [];
+  for (const [f, mark] of [[['README.md'], '- '], [['docs', 'search.md'], '- **PENDING:** '], [['docs', 'install.md'], '- **PENDING:** ']]) {
+    const lines = read(...f).split('\n');
+    const start = lines.findIndex((l) => /^## Not yet proven\s*$/.test(l));
+    if (start < 0) { missing.push(f.join('/') + ': no "Not yet proven" section'); continue; }
+    let end = lines.findIndex((l, i) => i > start && /^## /.test(l));
+    if (end < 0) end = lines.length;
+    const bullet = lines.slice(start + 1, end).find((l) => l.startsWith(mark) && has(norm(l), key));
+    if (!bullet) missing.push(f.join('/') + ': no partial-call bullet');
+  }
+  assert.deepEqual(missing, []);
+});
+
+test('11 SR-50 points 7 and 9, 3.1 fact 7, 9.13 (third logged-in probe): README and docs/search.md give the index path and the OFF file place, say a list in the stored forms reached a plugin server as stored and one set through the interactive form may not narrow until that form is proven, and give no instruction to set the never-lists with --values-stdin; the held lines name every manifest option with no default and every non-text option with a default', () => {
   for (const f of [['README.md'], ['docs', 'search.md']]) {
     const text = norm(read(...f));
     for (const k of [
       '<config folder>/plugins/data/pocotoko-search-pocotoko/indexes/<16 hex>/',
       '<KIT>/search/data/',
-      "in a plugin install, the never-lists (`never_terms`, `never_folders`, `never_globs`) may not narrow anything until the form in which a list reaches the server is proven",
+      'may not narrow anything when they are set through the interactive `/plugin configure` form, or when you change only some options with `claude plugin configure`, until both are proven',
+      "reached a plugin's server as stored, and the kit reads such a list entry by entry",
       'search: do not index'
     ]) assert.ok(has(text, norm(k)), f.join('/') + ' is missing: ' + k);
   }
@@ -620,8 +714,28 @@ test('11 SR-50 points 7 and 9, 3.1 fact 7: README and docs/search.md give the in
   }
   assert.deepEqual(Object.keys(rows).sort(), ['never_folders', 'never_globs', 'never_terms'], 'docs/search.md options table rows');
   for (const [k, line] of Object.entries(rows)) assert.ok(has(line, '(Plugin install: see the caveat in point 9'), k + ' row is missing the plugin-install caveat');
-  assert.ok(has(rows.never_terms, 'until the list form is proven, it may not drop or skip anything'), 'never_terms row: the caveat says it may not drop or skip');
+  assert.ok(has(rows.never_terms, 'a list set through the interactive form may not drop or skip anything until that form is proven'), 'never_terms row: the caveat says an interactive-form list may not drop or skip');
   assert.ok(!/A chunk holding it is dropped|a file whose path holds it is skipped/.test(rows.never_terms), 'never_terms row must not state the drop as fact');
+  // 3.1 fact 7 still open (i) and (iii): the held lines name every manifest option with no
+  // default, and every non-text option with a default, on the README, search and install pages.
+  // Every page and option is checked; the failures are collected and asserted once.
+  const cfg = readJson('src', 'search', '.claude-plugin', 'plugin.json').userConfig;
+  const noDefault = Object.keys(cfg).filter((k) => !Object.prototype.hasOwnProperty.call(cfg[k], 'default'));
+  const nonTextDefault = Object.keys(cfg).filter((k) => !noDefault.includes(k) && cfg[k].type !== 'string');
+  assert.ok(noDefault.length > 0 && nonTextDefault.length > 0);
+  const missing = [];
+  const namedIn = (line) => [...line.matchAll(/`([a-z_]+)`/g)].map((m) => m[1]);
+  for (const [f, start] of [[['README.md'], 'Whether an option with no default that you never set'], [['docs', 'search.md'], '**PENDING:** whether an option that has no default'], [['docs', 'install.md'], 'Whether a never-set option with no default']]) {
+    const lines = read(...f).split('\n');
+    const line = lines.find((l) => l.includes(start));
+    if (!line) { missing.push(f.join('/') + ': no no-default line'); continue; }
+    for (const k of noDefault) if (!namedIn(line).includes(k)) missing.push(f.join('/') + ': no-default line does not name ' + k);
+    const held = lines.find((l) => /has not been seen/.test(l) && nonTextDefault.every((k) => namedIn(l).includes(k)));
+    if (!held) missing.push(f.join('/') + ': no not-seen line naming ' + nonTextDefault.join(', '));
+  }
+  // 9.13 / fix round 3: a sentence that names --values-stdin must be a fact or PENDING sentence; never an instruction.
+  for (const f of valuesStdinPages()) for (const v of valuesStdinViolations(read(...f))) missing.push(f.join('/') + ': ' + v);
+  assert.deepEqual(missing, []);
 });
 
 test('11 / 6.11 h: README "Not yet proven" holds the never-list bullet; the copy-by-hand scope is on the 6.11 h note in session-limits and install; the plugins folder is the folder CLAUDE_CODE_PLUGIN_CACHE_DIR names', () => {

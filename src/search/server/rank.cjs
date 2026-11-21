@@ -150,10 +150,9 @@ function parseSynonyms(raw) {
   const groups = new Map();
   let bad = 0;
   let maxTermWords = 0;
-  // List arrival goes through floor.splitListOption only (an array, a JSON-array text, or
-  // one string split on commas and new lines) and follows its open seam (check 5): the form
-  // after substitution is not seen yet. A valid synonym entry holds no comma, so the comma
-  // split is safe if a comma list arrives (9.13 a, b).
+  // List arrival goes through floor.splitListOption only. Live check 5: a set list reaches
+  // the server as the stored text (a comma line or a JSON-array text); a valid synonym
+  // entry holds no comma, so the comma split keeps each entry whole (9.13 a, b).
   const { entries } = floor.splitListOption(raw);
   entries.forEach((entry, i) => {
     try {

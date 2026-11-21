@@ -18,7 +18,7 @@ These nine points come first because they decide whether search is right for a p
 6. On Windows the index takes the permissions of your profile folder. On a shared machine, check them.
 7. Uninstalling the plugin deletes the index when it is removed from the last place it is installed, unless you used `--keep-data`. In a few cases Claude Code keeps the folder, for example when another plugin shares it or its install records cannot be read. The index lives under `indexes` in the data folder, one subfolder per project, named by a hash. To delete it by hand, remove that data folder (plugin install) or the `search/data` folder inside the kit folder (copy-by-hand).
 8. Do not index material you are not allowed to copy, such as some client or regulated data. A local copy can still break a policy.
-9. To switch search off for one project, remove its folder from the `projects` option. To switch it off everywhere, create a file named `OFF` in the search data folder: `pocotoko-search-pocotoko/` inside the plugins data folder for a plugin install, `<KIT>/search/data/` for copy-by-hand. To skip more than the built-in list, add your own never-terms. **Caveat:** in a plugin install, the never-lists (`never_terms`, `never_folders`, `never_globs`) may not narrow anything until the form in which a list reaches the server is proven. Until then, keep sensitive files out of enabled projects, or put the line `search: do not index` in the first 15 lines of a file. A `search-config.json` array in a copy-by-hand install is not affected. (See Options.)
+9. To switch search off for one project, remove its folder from the `projects` option. To switch it off everywhere, create a file named `OFF` in the search data folder: `pocotoko-search-pocotoko/` inside the plugins data folder for a plugin install, `<KIT>/search/data/` for copy-by-hand. To skip more than the built-in list, add your own never-terms. **Caveat:** in a plugin install, the never-lists (`never_terms`, `never_folders`, `never_globs`) may not narrow anything when they are set through the interactive `/plugin configure` form, or when you change only some options with `claude plugin configure`, until both are proven. In the checks, a list stored as one comma-separated line or as JSON-array text (the forms `claude plugin configure --values-stdin` stores) reached a plugin's server as stored, and the kit reads such a list entry by entry. Until both are proven, keep sensitive files out of enabled projects, or put the line `search: do not index` in the first 15 lines of a file. A `search-config.json` array in a copy-by-hand install is not affected. (See Options.)
 
 ### Windows permissions
 
@@ -32,18 +32,18 @@ Once Claude reads a planted line, it is text in the chat. If you let Claude run 
 
 Search is off for every project until you list its folder in the `projects` option.
 
-- **Plugin install:** `/plugin configure`, or `claude plugin configure`.
+- **Plugin install:** `/plugin configure`, or `claude plugin configure`. If you change only some options, see "Not yet proven".
 - **Copy-by-hand:** the `projects` list in `search-config.json`, in the kit folder's `search/data` folder.
 
 Rules for the list:
 
 - Each entry must be a full path. A relative, empty or unreadable entry is ignored, and counted in `status`.
 - An entry enables a project only when it is **exactly** the folder Claude Code was started in, after links are resolved. Listing `/x/a` does not enable `/x/ab`. Listing a parent does not enable its child.
-- **List the folder you start sessions in.** Claude Code gives hooks the folder the session started in, not the top of the git repo. If you start in a subfolder, list that subfolder. What the search server itself is given in this case has not been confirmed (see "Not yet proven").
+- **List the folder you start sessions in.** Claude Code gives hooks the folder the session started in, not the top of the git repo. In the checks, a plugin's server was given the same folder, and the search server binds the folder it is given. If you start in a subfolder, list that subfolder.
 - A repo cannot switch itself on. The option is stored only at user or managed level, and no search tool can change it.
 - Some folders are refused outright: a drive or filesystem root, your home folder or anything above it, your config folder, the plugin's own data folder and plugins folder, the system temp folder, and network paths.
 
-**More than one folder.** A comma-separated list works on every system when each listed folder exists. If a folder name itself holds a comma and the value could be read two ways, or neither way fits, search stays off for everyone, with a fixed message. Then give the list as JSON-array text, for example `["/path/one","/path/two"]`, as one line. The settings command `claude plugin configure --values-stdin` stores such a line as it was typed.
+**More than one folder.** A comma-separated list works on every system when each listed folder exists. If a folder name itself holds a comma and the value could be read two ways, or neither way fits, search stays off for everyone, with a fixed message. Then give the list as JSON-array text, for example `["/path/one","/path/two"]`, as one line. If you later change only some options, see "Not yet proven".
 
 ## Two matching levels
 
@@ -111,7 +111,7 @@ A successor path is shown only when it names a file in the index. Anyone's name 
 
 ## Options
 
-All options are set at user level. Nothing inside a project can set them.
+All options are set at user level. Nothing inside a project can set them. In a plugin install, Claude Code hands each text, number or list option you set to the server as the text you stored (seen in the checks for a plugin's server). In the checks, a text option you never set that has a default reached such a server as that default; for search that would apply to `matching` and `word_families`.
 
 | Option | Default | What it does |
 |---|---|---|
@@ -121,7 +121,7 @@ All options are set at user level. Nothing inside a project can set them.
 | `extra_types` | empty | Extra file extensions to index. |
 | `never_folders` | empty | Folder names to skip. Narrows only. (Plugin install: see the caveat in point 9.) |
 | `never_globs` | empty | File patterns to skip. Narrows only. (Plugin install: see the caveat in point 9.) |
-| `never_terms` | empty | A term, matched as plain text ignoring case. It is meant to drop a chunk holding it and to skip a file whose path holds it. (Plugin install: see the caveat in point 9; until the list form is proven, it may not drop or skip anything.) The term never appears in `status` or any file the kit writes. |
+| `never_terms` | empty | A term, matched as plain text ignoring case. It is meant to drop a chunk holding it and to skip a file whose path holds it. (Plugin install: see the caveat in point 9; a list set through the interactive form may not drop or skip anything until that form is proven.) The term never appears in `status` or any file the kit writes. |
 | `synonyms` | empty | One group per entry, as `term=alt\|alt`. One-way. No commas. Each side is one to three words. |
 | `drop_contacts` | true | Drop chunks holding email addresses or phone numbers. |
 | `max_file_bytes` | 1048576 | Largest file indexed. Kept between 1,024 and 4,194,304. |
@@ -157,15 +157,16 @@ From your own terminal, in the repo, run `node scripts/skip-report.mjs [<project
 
 ## Organisation-managed MCP settings
 
-If your organisation's managed MCP configuration takes exclusive control of MCP servers, you will not get plugin MCP servers, so search cannot start. This comes from the Claude Code docs and is not yet confirmed on a live run. When it was tried, `claude mcp add --scope user` was refused on such a machine, so a copy-by-hand install cannot register the server there either.
+If your organisation's managed MCP configuration takes exclusive control of MCP servers, you will not get plugin MCP servers, so search cannot start. This comes from the Claude Code docs, and two live runs showed it: with such a file in place no plugin MCP server was listed or started; with the file moved aside, they all were. When it was tried, `claude mcp add --scope user` was refused on such a machine, so a copy-by-hand install cannot register the server there either.
 
 ## Not yet proven
 
 These have not been seen on a live run, so nothing here is stated as fact.
 
-- **PENDING:** how the options reach the search server when Claude Code starts it, including the exact form a list takes. Until that is seen, only `projects` is known to fail safe: if it gets no value, or a list in a different form, search stays off. **The never-lists do not fail safe.** In a plugin install, if a list reaches the server in another form, `never_terms`, `never_folders` and `never_globs` may not narrow anything, because one unsplit entry matches nothing. Until the form is proven, keep sensitive files out of enabled projects, or put the line `search: do not index` in the first 15 lines of a file. A `search-config.json` array in a copy-by-hand install is not affected.
-- **PENDING:** whether an option you never set stops the server from starting. If it does, the docs will say how to set every option. No instruction is given here until that is known.
-- **PENDING:** the folder the server sees as the project folder when a session starts in a subfolder. The hooks' view is known; the server's is not.
-- **PENDING:** whether the plugin cache folder variable reaches the server.
+- **PENDING:** the form a list takes at the search server when you set it through the interactive `/plugin configure` form. In the checks, a list stored as one comma-separated line or as JSON-array text (the forms `claude plugin configure --values-stdin` stores) reached a plugin's server exactly as stored, and the kit reads such a list entry by entry. For a list set the interactive way, only `projects` is known to fail safe: if it arrives in a different form, search stays off. **The never-lists do not fail safe.** If the interactive form stores a list differently, `never_terms`, `never_folders` and `never_globs` may not narrow anything, because one unsplit entry matches nothing. Until that form and the partial-call question below are proven, keep sensitive files out of enabled projects, or put the line `search: do not index` in the first 15 lines of a file. A `search-config.json` array in a copy-by-hand install is not affected.
+- **PENDING:** when you change some options with `claude plugin configure`, whether the options you did not name are kept has not been seen. If they were dropped, a never-list could stop narrowing. Until this and the interactive form are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line. A `search-config.json` array in a copy-by-hand install is not affected.
+- **PENDING:** whether an option that has no default, and that you never set, stops the server from starting: `projects`, `extra_types`, `never_folders`, `never_globs`, `never_terms` or `synonyms`. In the checks, a stand-in server's never-set text option with a default got that default; for search that would apply to `matching` and `word_families`. For `drop_contacts` and `max_file_bytes`, which have a default but are not text, whether a never-set one stops the server, and what value it then gets, has not been seen. If a never-set option with no default does stop the server, the docs will say what to set. No instruction is given here until that is known.
+- **PENDING:** Claude Code starting the real search server. The live checks used small stand-in servers, started the same way: by `node`, with options in their environment.
+- **PENDING:** whether the plugin cache folder variable (`CLAUDE_CODE_PLUGIN_CACHE_DIR`) reaches the search server when the cache is really moved to another place. In the checks it reached a plugin's server unchanged, but it was set to the default place there.
 
 Report what you see. See `.github/SECURITY.md` for how to report a problem that affects safety.

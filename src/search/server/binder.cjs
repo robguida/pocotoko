@@ -74,7 +74,11 @@ function configDirOf(env, home, platform = process.platform) {
   return realLoose(path.join(home, '.claude'));
 }
 
-/** The plugins folder (SR-4 g): CLAUDE_CODE_PLUGIN_CACHE_DIR when set, else <config>/plugins. */
+/**
+ * The plugins folder (SR-4 g): CLAUDE_CODE_PLUGIN_CACHE_DIR when set, else <config>/plugins.
+ * Live check 6 (Claude Code 2.1.329): a set CLAUDE_CODE_PLUGIN_CACHE_DIR reaches the server unchanged
+ * (seen set to the default location only; a cache moved elsewhere is not shown yet).
+ */
 function pluginsDirOf(env, configDir, platform = process.platform) {
   const v = env.CLAUDE_CODE_PLUGIN_CACHE_DIR;
   if (nonEmpty(v) && isAbsoluteFor(v.trim(), platform)) return realLoose(v.trim());
@@ -136,9 +140,9 @@ function isPluginSourceFolder(dir) {
  */
 function resolveRoot({ env, cwd, platform = process.platform }) {
   // Live check 6 (Claude Code 2.1.329): for a session started in a subfolder of a git
-  // project, CLAUDE_PROJECT_DIR holds that start folder, not the git top (seen by hooks).
-  // Bind exactly the variable's real path, else the start folder; never ask for MCP roots
-  // (SR-3); never walk up to a git top.
+  // project, CLAUDE_PROJECT_DIR and the server's start folder are that subfolder, not the
+  // git top (seen by hooks and by the server). Bind exactly the variable's real path, else
+  // the start folder; never ask for MCP roots (SR-3); never walk up to a git top.
   // SR-4 f: a network path is refused by its text, before any real-path resolution, so
   // binding never touches the network.
   const v = env.CLAUDE_PROJECT_DIR;
@@ -268,10 +272,9 @@ function commaReading(raw, platform, realDir = realDirOf) {
  */
 function projectSwitch(rootReal, raw, ctx = {}) {
   const platform = ctx.platform || process.platform;
-  // The list goes through floor.splitListOption only, and follows its open seam (check 5):
-  // the arrival form after substitution is not seen yet. An array or a JSON-array text is
-  // one entry per element. A joined string holding a comma is read by what exists (9.1 e,
-  // commaReading); this option fails closed if the arrival form differs (search stays off).
+  // The list goes through floor.splitListOption only. Live check 5: it arrives as the stored
+  // text. An array or a JSON-array text is one entry per element; a joined string holding a
+  // comma is read by what exists (9.1 e, commaReading); anything unreadable fails closed.
   const split = floor.splitListOption(raw);
   let entries = split.entries;
   const out = { enabled: false, bad: 0, refusedEntries: 0, listRefused: false };

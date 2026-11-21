@@ -26,14 +26,17 @@ The last line is optional and adds search. The one-command form is `claude plugi
 
 **Installing from a local folder is a developer path only.** It runs the plugin from its source folder, and in that mode the kit saves nothing: no meter warnings, no hand-off files, and search is off with a message that says so. It is not offered as a user install. To test plugin mode as a developer, install from a git source.
 
-**Organisations with managed MCP settings.** If your organisation's managed MCP configuration takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you. This comes from the Claude Code docs and is not yet confirmed on a live run. The core plugin has only hooks and skills, so it is not affected. On a machine like that, `claude mcp add --scope user` was refused ("enterprise MCP configuration is active and has exclusive control over MCP servers"), so the copy-by-hand step that registers the search server cannot work there either. A copy-by-hand install of the core alone is fine.
+**Organisations with managed MCP settings.** If your organisation's managed MCP configuration takes exclusive control of MCP servers, you will not get plugin MCP servers, so the search plugin cannot start for you. This comes from the Claude Code docs, and two live runs showed it: with such a file in place no plugin MCP server was listed or started; with the file moved aside, they all were. The core plugin has only hooks and skills, so it is not affected. On a machine like that, `claude mcp add --scope user` was refused ("enterprise MCP configuration is active and has exclusive control over MCP servers"), so the copy-by-hand step that registers the search server cannot work there either. A copy-by-hand install of the core alone is fine.
 
 ### Search options and the folder you start in
 
 - Search is off until you list a folder in `projects`. The list takes full paths, one per entry. A comma-separated list works when each listed folder exists. If a folder name holds a comma and the value could be read two ways, search stays off with a fixed message, and you give the list as JSON-array text on one line.
-- **List the folder you start sessions in.** For a session started in a subfolder of a git project, hooks are given that start folder as `CLAUDE_PROJECT_DIR`, not the top of the repo. So `projects` must name the folder you open Claude in. What the search server itself is given in that case has not been confirmed yet.
+- **List the folder you start sessions in.** For a session started in a subfolder of a git project, hooks are given that start folder as `CLAUDE_PROJECT_DIR`, not the top of the repo. In the checks, a plugin's server was given the same start folder, and the search server binds the folder it is given. So `projects` must name the folder you open Claude in.
 - The plugin's options are stored at user level only. A repo cannot set them.
-- Claude Code blocks a launch that names an option you never set, and only that launch. The core hooks name no options. They read their options from environment variables, so an option you never set simply takes its default, and no hook launch can be blocked this way. Whether a never-set option blocks the search server's launch has not been seen. See "Not yet proven" below.
+- Claude Code blocks a hook launch that names an option you never set, and only that launch. The core hooks name no options. They read their options from environment variables, so an option you never set simply takes its default, and no hook launch can be blocked this way.
+- In the checks, a plugin's server got its options only through its launch settings, as the text stored. In the checks, a stand-in server's never-set text option with a default got that default; for search that would apply to `matching` and `word_families`.
+- Whether a never-set option with no default (`projects`, `extra_types`, `never_folders`, `never_globs`, `never_terms`, `synonyms`) blocks the search server has not been seen. See "Not yet proven" below.
+- Whether a never-set `drop_contacts` or `max_file_bytes` (options with a default that are not text) blocks the search server, and what value it then gets, has not been seen either.
 
 ## Node and your `PATH`
 
@@ -41,7 +44,7 @@ Plugin mode starts Node by the plain name `node`, found on your `PATH`, and has 
 
 **Why the lookup matters on Windows.** Some launchers look in the current folder before they look on `PATH`. A repository could plant its own program named `node` at its top, and a bare `node` could then run that instead of yours. A plugin cannot control how Claude Code finds its launch program, so the kit's defence is in layers, and it is honest about the limit.
 
-- In the checks made for this kit (Claude Code 2.1.329), a planted copy did not run for any hook. Programs named `node.exe`, `node.com`, `node.cmd` and `node.bat` were all planted together, and every hook form ran the Node on `PATH`. That was seen for hooks. It was not yet seen for the search server (see "Not yet proven").
+- In the checks made for this kit (Claude Code 2.1.329), a planted copy did not run for any hook. Programs named `node.exe`, `node.com`, `node.cmd` and `node.bat` were all planted together, and every hook form ran the Node on `PATH`. The same was seen for a plugin's MCP server started with `node`.
 - The kit cannot control how Claude Code finds the program.
 - The self-check catches a stray but genuine Node only; it can never stop a planted program. If a Node that sits inside your project folder runs a kit script, the script does nothing and says so. A planted program never runs the kit's code at all, so the self-check cannot see it. Keep Node outside your projects: a normal install on `PATH`, or the full path in a copy-by-hand install.
 - A copy-by-hand install always uses the full path of Node, so nothing planted is ever looked up. You must update that path after you move or upgrade Node.
@@ -52,7 +55,7 @@ Plugin mode starts Node by the plain name `node`, found on your `PATH`, and has 
 - **macOS and Linux.** Use the bash blocks. `zsh` is fine.
 - **A home folder kept as a git repo.** The kit writes nothing in a git work tree. If your Claude config folder is inside a git repo, the core says so at session start and saves nothing, and search switches itself off and says why. Move the config folder out of the repo to turn them on.
 - **A config folder inside the project you opened (copy-by-hand install)** (for example you started Claude in your config folder, or in a dotfiles repo that holds it). Each session prints that the routing rules were not added, because the skill file sits inside the current project. See `session-limits.md`.
-- **Moved plugin cache.** If `CLAUDE_CODE_PLUGIN_CACHE_DIR` is set, the plugins folder is the folder that variable names, so the data folders move with it. The search server must receive that variable for the kit to tell an installed copy from a source folder; whether it does has not been seen.
+- **Moved plugin cache.** If `CLAUDE_CODE_PLUGIN_CACHE_DIR` is set, the plugins folder is the folder that variable names, so the data folders move with it. The search server must receive that variable for the kit to tell an installed copy from a source folder. In the checks, the variable reached a plugin's server unchanged, but it was set to the default location there. A cache truly moved elsewhere has not been seen at a server.
 
 ## Copy by hand
 
@@ -346,7 +349,11 @@ if (Test-Path -LiteralPath "$KIT" -PathType Container) {
 
 These are open. Nothing here is stated as fact.
 
-- **PENDING:** Claude Code itself starting the search server, on a machine with no organisation-managed MCP file. How options reach the server, what `CLAUDE_PROJECT_DIR` holds for it, whether a never-set option blocks its launch, and whether a planted `node` program could run for its launch have not been seen live. The server fails safe: with no `projects` value, search stays off.
+- **PENDING:** Claude Code itself starting the real search server. The live checks used small stand-in servers. They showed how options reach a plugin's server, that such a server is given the folder the session started in, and that a planted `node` program did not run for a launch by `node`. Whether a never-set option with no default blocks the launch has not been seen. The server fails safe: with no `projects` value, search stays off.
+- **PENDING:** a list option set through the interactive `/plugin configure` form. In the checks, a list stored as one comma-separated line or as JSON-array text reached a plugin's server as stored; a list set through the interactive form has not been seen there. See `search.md`. Until this and the next item are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
+- **PENDING:** when you change some options with `claude plugin configure`, whether the options you did not name are kept has not been seen. If they were dropped, a never-list could stop narrowing. Until this and the interactive form are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
+- **PENDING:** whether a never-set boolean or number option that has a default (`drop_contacts`, `max_file_bytes`) blocks the search server, and what text arrives. The checks applied only a text default.
+- **PENDING:** whether the plugin cache folder variable (`CLAUDE_CODE_PLUGIN_CACHE_DIR`) reaches the search server when the cache is really moved to another place. In the checks it reached a plugin's server unchanged, but it was set to the default place there.
 - **PENDING:** the copy-by-hand step that registers the search server, on a machine with an organisation-managed MCP file. It was refused there. The step's arguments are proven; a run on a machine without that file is still needed.
 - **PENDING:** the `<owner>/<repo>` shorthand, and the pinned-version form, against a real host repository.
 - **PENDING:** whether a project's own settings can move your config folder into the project. The kit's check for that is in place and tested, but the live behaviour has not been verified.

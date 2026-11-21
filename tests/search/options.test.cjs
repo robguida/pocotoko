@@ -1,16 +1,28 @@
 'use strict';
 // Query options (spec 9.13): the synonym format `term=alt|alt`, both list arrival forms,
 // limits and bad_synonym, one-way groups, multi-word alternatives within 8 positions,
-// synonyms in the 20-term cap; matching and word_families reach the store and its status.
+// synonyms in the 20-term cap; matching and word_families reach the store and its status;
+// live check 5 at the server (third logged-in probe): the list forms seen there, manifest
+// defaults equal to code defaults, CLAUDE_PLUGIN_OPTION_* ignored, no seam marker left.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const I = require('../../src/search/server/index.cjs');
 const R = require('../../src/search/server/rank.cjs');
 const T = require('../../src/search/server/tokenize.cjs');
+const Fl = require('../../src/search/server/floor.cjs');
+const S = require('../../src/search/server/server.cjs');
+const B = require('../../src/search/server/binder.cjs');
 const { makeRun, openStore, cleanupRuns } = require('../helpers/search-run.cjs');
+const { REPO_TOP, makeTempDir, removeDir } = require('../helpers/tmpdir-sandbox.cjs');
 
-test.after(() => cleanupRuns());
+const tempDirs = [];
+test.after(() => {
+  cleanupRuns();
+  for (const d of tempDirs) removeDir(d);
+});
 
 function chunk(key, path, text, heading = '') {
   return { key, path, heading, trail: heading, line: 1, date: null, flag: 'unmarked', successor: null, text };
@@ -239,4 +251,183 @@ test('store: the matching, word_families and synonyms options reach ranking; sta
   assert.equal((await idxOpt.search('undo')).notice, null);
   // Status never shows a synonym value (totals only).
   assert.ok(!JSON.stringify(off.status()).includes('rollback'));
+});
+
+// ---------------------------------------------------------------------------
+// Live check 5 at the server (third logged-in probe; spec 3.1 fact 7 f, 9.13). The two list
+// forms the CLI stores reached a stdio server's env as the stored text exactly.
+
+const LIVE_COMMA_LINE = 'alpha,beta gamma,delta';
+const LIVE_JSON_TEXT = '["alpha","beta gamma","delta,eps"]';
+const envOf = (key, value) => ({ [S.ENV_PREFIX + key.toUpperCase()]: value });
+
+test('9.13 / live check 5 (server, third probe): the list forms seen at the server (a comma line, a JSON-array text) give the entries typed through server.optionsFromEnv for never_terms, never_folders, never_globs and synonyms', () => {
+  const forms = [
+    [LIVE_COMMA_LINE, ['alpha', 'beta gamma', 'delta']],
+    [LIVE_JSON_TEXT, ['alpha', 'beta gamma', 'delta,eps']],
+  ];
+  // Every form is checked; the failures are collected and asserted once with the full list.
+  const failures = [];
+  for (const [arrived, typed] of forms) try {
+    const env = {
+      ...envOf('never_terms', arrived),
+      ...envOf('never_folders', arrived),
+      ...envOf('never_globs', arrived),
+    };
+    const opts = S.optionsFromEnv(env);
+    assert.deepEqual(Object.keys(opts).sort(), ['never_folders', 'never_globs', 'never_terms'], arrived);
+    const f = Fl.buildFilter(opts);
+    assert.deepEqual(f.neverTerms, typed, 'never_terms: ' + arrived);
+    assert.deepEqual([...f.neverFolders], typed, 'never_folders: ' + arrived);
+    assert.equal(f.neverGlobs.length, typed.length, 'never_globs: ' + arrived);
+    assert.deepEqual(f.counts, { bad_extra_type: 0, extra_type_refused: 0, bad_never_folder: 0, bad_never_glob: 0, bad_never_term: 0 });
+    // The same effective filter as the entries given as a real array.
+    const fromArray = Fl.buildFilter({ never_terms: typed, never_folders: typed, never_globs: typed });
+    assert.equal(f.optionsHash, fromArray.optionsHash, 'same options hash as the typed entries: ' + arrived);
+    // A never-term holding a space is one term: it hits that phrase only.
+    assert.equal(Fl.termHit(f, 'notes on beta gamma here'), true);
+    assert.equal(Fl.termHit(f, 'only gamma here'), false);
+  } catch (err) {
+    failures.push(arrived + ': ' + (err && err.message));
+  }
+  assert.deepEqual(failures, []);
+  // A comma inside a JSON-array element stays one term.
+  const j = Fl.buildFilter(S.optionsFromEnv(envOf('never_terms', LIVE_JSON_TEXT)));
+  assert.equal(Fl.termHit(j, 'see delta,eps'), true);
+  assert.equal(Fl.termHit(j, 'only eps here'), false);
+
+  const synComma = 'deploy=ship|release,undo=roll back';
+  const synJson = JSON.stringify(['deploy=ship|release', 'undo=roll back']);
+  const synFailures = [];
+  for (const arrived of [synComma, synJson]) try {
+    const opts = S.optionsFromEnv(envOf('synonyms', arrived));
+    const p = R.parseSynonyms(opts.synonyms);
+    assert.deepEqual(groupsOf(p), [['deploy', ['ship', 'release']], ['undo', ['roll back']]], arrived);
+    assert.equal(p.bad, 0);
+    assert.deepEqual(groupsOf(R.queryOptions(opts).synonyms), groupsOf(p));
+  } catch (err) {
+    synFailures.push(arrived + ': ' + (err && err.message));
+  }
+  assert.deepEqual(synFailures, []);
+});
+
+test('9.13 / 9.1 e / live check 5 (server, third probe): projects in both list forms seen at the server enable exactly the listed real folders through binder.projectSwitch', () => {
+  const base = fs.realpathSync.native(makeTempDir('options-live-projects'));
+  tempDirs.push(base);
+  const mk = (name) => {
+    const p = path.join(base, name);
+    fs.mkdirSync(p, { recursive: true });
+    return fs.realpathSync.native(p);
+  };
+  const alpha = mk('alpha');
+  const betaGamma = mk('beta gamma');
+  const delta = mk('delta');
+  const deltaEps = mk('delta,eps');
+  const other = mk('other');
+  const ctx = { platform: process.platform };
+
+  // The comma line, as it arrived: every piece is an existing folder, the whole text is not.
+  const commaLine = [alpha, betaGamma, delta].join(',');
+  const c = S.optionsFromEnv(envOf('projects', commaLine)).projects;
+  assert.equal(c, commaLine, 'passed on raw');
+  // Every folder is checked; the failures are collected and asserted once with the full list.
+  const commaFailures = [];
+  for (const root of [alpha, betaGamma, delta]) try {
+    const r = B.projectSwitch(root, c, ctx);
+    assert.equal(r.enabled, true, 'comma line enables ' + path.basename(root));
+    assert.equal(r.listRefused, false);
+    assert.equal(r.bad, 0);
+  } catch (err) {
+    commaFailures.push(path.basename(root) + ': ' + (err && err.message));
+  }
+  assert.deepEqual(commaFailures, []);
+  assert.equal(B.projectSwitch(other, c, ctx).enabled, false, 'a folder not listed stays off');
+
+  // The JSON-array text, as it arrived: an element holding a comma is one folder.
+  const jsonText = JSON.stringify([alpha, betaGamma, deltaEps]);
+  const j = S.optionsFromEnv(envOf('projects', jsonText)).projects;
+  const jsonFailures = [];
+  for (const root of [alpha, betaGamma, deltaEps]) try {
+    const r = B.projectSwitch(root, j, ctx);
+    assert.equal(r.enabled, true, 'JSON-array text enables ' + path.basename(root));
+    assert.equal(r.listRefused, false);
+    assert.equal(r.bad, 0);
+  } catch (err) {
+    jsonFailures.push(path.basename(root) + ': ' + (err && err.message));
+  }
+  assert.deepEqual(jsonFailures, []);
+  assert.equal(B.projectSwitch(delta, j, ctx).enabled, false, 'the folder before the comma is not enabled');
+});
+
+test('9.13 / live check 5 (server, third probe): each manifest default given as text gives the same effective options as the option being absent (manifest and code defaults stay equal)', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO_TOP, 'src', 'search', '.claude-plugin', 'plugin.json'), 'utf8'));
+  const withDefault = Object.entries(manifest.userConfig).filter(([, v]) => Object.prototype.hasOwnProperty.call(v, 'default'));
+  assert.ok(withDefault.length > 0, 'the manifest declares defaults');
+  const effective = (opts) => {
+    const f = Fl.buildFilter(opts);
+    const q = R.queryOptions(opts);
+    return {
+      allowTypes: [...f.allowTypes].sort(),
+      neverFolders: [...f.neverFolders].sort(),
+      neverGlobs: f.neverGlobs.length,
+      neverTerms: f.neverTerms.slice().sort(),
+      dropContacts: f.dropContacts,
+      maxFileBytes: f.maxFileBytes,
+      counts: f.counts,
+      optionsHash: f.optionsHash,
+      matching: q.matching,
+      wordFamilies: q.wordFamilies,
+      synonyms: groupsOf(q.synonyms),
+      badSynonyms: q.synonyms.bad,
+    };
+  };
+  const absent = effective(S.optionsFromEnv({}));
+  const all = {};
+  // Every option is checked; the failures are collected and asserted once with the full list.
+  const failures = [];
+  for (const [key, spec] of withDefault) {
+    try {
+      if (!S.OPTION_KEYS.includes(key)) { failures.push(key + ': not a server option'); continue; }
+      // A never-set string option with a default reached a live server as the default text;
+      // for the boolean and number options the same text is assumed (not probed, 9.13).
+      const env = envOf(key, String(spec.default));
+      Object.assign(all, env);
+      const opts = S.optionsFromEnv(env);
+      if (JSON.stringify(Object.keys(opts)) !== JSON.stringify([key])) failures.push(key + ': not read as a set value');
+      if (JSON.stringify(effective(opts)) !== JSON.stringify(absent)) failures.push(key + ': the manifest default ' + JSON.stringify(spec.default) + ' differs from the code default');
+    } catch (err) {
+      failures.push(key + ': threw ' + (err && err.name));
+    }
+  }
+  assert.deepEqual(failures, []);
+  assert.deepEqual(effective(S.optionsFromEnv(all)), absent, 'every default at once');
+  // Control: a value that differs from a default does change the effective options.
+  assert.notDeepEqual(effective(S.optionsFromEnv(envOf('max_file_bytes', '2048'))), absent);
+  assert.notDeepEqual(effective(S.optionsFromEnv(envOf('matching', 'exact'))), absent);
+  assert.notDeepEqual(effective(S.optionsFromEnv(envOf('drop_contacts', 'false'))), absent);
+});
+
+test('3.1 fact 2 / live check 5 (server, third probe): the server ignores CLAUDE_PLUGIN_OPTION_* (servers never get them); only SEARCH_OPTION_<KEY> is read, and empty or raw placeholder text counts as unset', () => {
+  const pluginVars = {};
+  for (const k of S.OPTION_KEYS) pluginVars['CLAUDE_PLUGIN_OPTION_' + k.toUpperCase()] = k === 'projects' ? REPO_TOP : 'x';
+  assert.deepEqual(S.optionsFromEnv(pluginVars), {}, 'nothing is read from the hook variables');
+  assert.deepEqual(S.optionsFromEnv({ ...pluginVars, ...envOf('matching', 'exact') }), { matching: 'exact' });
+  const placeholder = '$' + '{user_config.never_terms}';
+  assert.deepEqual(S.optionsFromEnv({ ...envOf('never_terms', ''), ...envOf('synonyms', placeholder) }), {}, 'empty and raw placeholder text are unset');
+});
+
+test('live check 5 (server, third probe): no SEAM(check 5) marker remains in src/search/', () => {
+  const files = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile()) files.push(p);
+    }
+  };
+  walk(path.join(REPO_TOP, 'src', 'search'));
+  assert.ok(files.some((f) => path.basename(f) === 'server.cjs'), 'the server source was walked');
+  const marker = 'SEAM' + '(check 5)';
+  const left = files.filter((f) => fs.readFileSync(f, 'utf8').includes(marker)).map((f) => path.relative(REPO_TOP, f));
+  assert.deepEqual(left, [], 'the server option seams are closed (third logged-in probe)');
 });
