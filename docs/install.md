@@ -34,7 +34,7 @@ The last line is optional and adds search. The one-command form is `claude plugi
 - **List the folder you start sessions in.** For a session started in a subfolder of a git project, hooks are given that start folder as `CLAUDE_PROJECT_DIR`, not the top of the repo. In the checks, a plugin's server was given the same start folder, and the search server binds the folder it is given. So `projects` must name the folder you open Claude in.
 - The plugin's options are stored at user level only. A repo cannot set them.
 - Claude Code blocks a hook launch that names an option you never set, and only that launch. The core hooks name no options. They read their options from environment variables, so an option you never set simply takes its default, and no hook launch can be blocked this way.
-- In the checks, a plugin's server got its options only through its launch settings, as the text stored. In the checks, a stand-in server's never-set text option with a default got that default; for search that would apply to `matching` and `word_families`.
+- In the checks, a plugin's server got its options only through its launch settings, as the text stored, and a stand-in server's never-set text option with a default got that default; for search that would apply to `matching` and `word_families`.
 - Whether a never-set option with no default (`projects`, `extra_types`, `never_folders`, `never_globs`, `never_terms`, `synonyms`) blocks the search server has not been seen. See "Not yet proven" below.
 - Whether a never-set `drop_contacts` or `max_file_bytes` (options with a default that are not text) blocks the search server, and what value it then gets, has not been seen either.
 

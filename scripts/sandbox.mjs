@@ -34,9 +34,9 @@ const CORE = 'pocotoko';
 const SEARCH = 'pocotoko-search';
 const DOLLAR = '$';
 
-// Facts this check cannot reach with no login (spec 16 B9; changelog held list). Listed, never faked.
+// Facts this no-login check does not reach (spec 16 B9; changelog held list). Listed, never faked.
 export const HELD = Object.freeze([
-  ['Still open for the search server, each needing a logged-in or interactive session: Claude Code itself starting the real search server; a never-set option with no default, or with a boolean or number default (drop_contacts, max_file_bytes), named in .mcp.json env (does it block, and what text arrives); a list set through the interactive /plugin configure form; a --values-stdin call naming only some keys (are the others kept); a plugin cache really moved with CLAUDE_CODE_PLUGIN_CACHE_DIR', 'needs a logged-in or interactive session on a machine without an organisation-managed MCP file'],
+  ['Still open for the search server, not done by this no-login check yet: Claude Code itself starting the real search server; a never-set option with no default, or with a boolean or number default (drop_contacts, max_file_bytes), named in .mcp.json env (does it block, and what text arrives); a list set through the interactive /plugin configure form; a --values-stdin call naming only some keys (are the others kept); a plugin cache really moved with CLAUDE_CODE_PLUGIN_CACHE_DIR', 'needs a machine without an organisation-managed MCP file (there a no-login claude mcp list launches plugin servers); the interactive /plugin configure form needs an interactive session'],
   ['Claude Code itself firing the installed hooks, and whether a project settings env reaches them (6.11 h)', 'needs a logged-in session'],
   ['The <owner>/<repo>#v<version> install form', 'needs the host repo'],
 ]);
