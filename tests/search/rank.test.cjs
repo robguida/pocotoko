@@ -4,6 +4,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { performance, PerformanceObserver } = require('node:perf_hooks');
 const I = require('../../src/search/server/index.cjs');
 const R = require('../../src/search/server/rank.cjs');
 const T = require('../../src/search/server/tokenize.cjs');
@@ -534,35 +535,91 @@ const cpuNow = typeof process.threadCpuUsage === 'function' ? () => process.thre
 const cpuSince = (a) => { const b = cpuNow(); return ((b.user - a.user) + (b.system - a.system)) / 1000; };
 
 /**
+ * Time taken off a partial result's spans for the runtime's own garbage-collection
+ * pauses (T-16). A pause of the runtime between two clock reads cannot be seen by
+ * the code, so one that runs past the budget line delays the read that finds the
+ * budget spent. Only two parts of a pause are taken off: the part between the
+ * budget line (budgetLine, on the performance clock) and the read that saw it
+ * (tripP), and the part inside the tail (tripP to endP). A pause wholly before
+ * the line is not taken off, because the code sees it in the clock and stops on
+ * time anyway. gcs is a list of { startTime, duration } (performance clock, ms).
+ * Never takes off more than a span holds. Pure: no clock, no I/O.
+ * Returns { total, tail, gcPast, gcTail }.
+ */
+function takeOffGc({ gcs, budgetLine, tripP, endP, total, tail }) {
+  const inside = (a, b) => gcs.reduce((sum, g) => {
+    const lo = Math.max(a, g.startTime);
+    const hi = Math.min(b, g.startTime + g.duration);
+    return hi > lo ? sum + (hi - lo) : sum;
+  }, 0);
+  const gcPast = inside(budgetLine, tripP);
+  const gcTail = inside(tripP, endP);
+  const less = (x, n) => Math.max(0, x - n);
+  return {
+    gcPast,
+    gcTail,
+    total: { wall: less(total.wall, gcPast + gcTail), cpu: less(total.cpu, gcPast + gcTail) },
+    tail: { wall: less(tail.wall, gcTail), cpu: less(tail.cpu, gcTail) },
+  };
+}
+
+/**
  * Run rank() with a clock that records when the budget guard trips, and measure
  * each span both by the wall clock and by the CPU time of the thread doing the
  * work (cpuNow). Other processes loading the machine stretch the wall clock
  * but not this thread's CPU time, so the smaller of the two is the work rank()
- * itself did (B7 review). Returns
- * { r, total: { wall, cpu }, tail: { wall, cpu } | null } in ms; `tail` runs
- * from the first clock read at or past the budget (the guard trips there) to
- * the return, and is null when no read ever reached the budget.
+ * itself did (B7 review). The runtime's own garbage-collection pauses that run
+ * past the budget line or inside the tail are taken off a partial result's
+ * spans (takeOffGc); everything else counts. Returns
+ * { r, total: { wall, cpu }, tail: { wall, cpu } | null, gc: { past, tail } } in ms;
+ * `tail` runs from the first clock read at or past the budget (the guard trips
+ * there) to the return, and is null when no read ever reached the budget.
+ * Async: the runtime reports garbage-collection entries a turn after the call.
  */
-function timedRank(idx, query, options) {
+async function timedRank(idx, query, options) {
   const budget = options.budgetMs === undefined ? R.QUERY_BUDGET_MS : options.budgetMs;
   let start = null;
+  let startP = 0;
   let trip = null;
   const now = () => {
     const t = Date.now();
-    if (start === null) start = t; // rank() reads the clock first for its start
-    else if (trip === null && t - start >= budget) trip = { wall: t, cpu: cpuNow() };
+    if (start === null) { start = t; startP = performance.now(); } // rank() reads the clock first for its start
+    else if (trip === null && t - start >= budget) trip = { wall: t, cpu: cpuNow(), p: performance.now() };
     return t;
   };
-  const cpu0 = cpuNow();
-  const wall0 = Date.now();
-  const r = R.rank(idx, query, { ...options, now });
-  const wall1 = Date.now();
-  const cpuTotal = cpuSince(cpu0);
-  return {
-    r,
-    total: { wall: wall1 - wall0, cpu: cpuTotal },
-    tail: trip ? { wall: wall1 - trip.wall, cpu: cpuSince(trip.cpu) } : null,
-  };
+  const obs = new PerformanceObserver(() => {});
+  obs.observe({ entryTypes: ['gc'] });
+  let r;
+  let wall0;
+  let wall1;
+  let endP;
+  let cpu0;
+  let cpuTotal;
+  try {
+    cpu0 = cpuNow();
+    wall0 = Date.now();
+    r = R.rank(idx, query, { ...options, now });
+    endP = performance.now();
+    wall1 = Date.now();
+    cpuTotal = cpuSince(cpu0);
+  } catch (e) {
+    obs.disconnect();
+    throw e;
+  }
+  const tailCpu = trip ? cpuSince(trip.cpu) : null;
+  await new Promise((res) => setImmediate(res)); // gc entries are queued, not synchronous
+  const gcs = obs.takeRecords();
+  obs.disconnect();
+  let total = { wall: wall1 - wall0, cpu: cpuTotal };
+  let tail = trip ? { wall: wall1 - trip.wall, cpu: tailCpu } : null;
+  let gc = { past: 0, tail: 0 };
+  if (r.partial && trip) {
+    const a = takeOffGc({ gcs, budgetLine: startP + budget, tripP: trip.p, endP, total, tail });
+    total = a.total;
+    tail = a.tail;
+    gc = { past: a.gcPast, tail: a.gcTail };
+  }
+  return { r, total, tail, gc };
 }
 
 /** The smaller of the wall-clock and own-CPU measure of a span. */
@@ -570,7 +627,7 @@ function own(span) {
   return Math.min(span.wall, span.cpu);
 }
 
-test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, each holding all 32 query words) → within the budget, or partial within the budget plus the 250 ms tail', (t) => {
+test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, each holding all 32 query words) → within the budget, or partial within the budget plus the 250 ms tail', async (t) => {
   const TAIL_MS = 250; // spec 9.5 query handling (SR-28)
   const HARD_STOP = 50000; // spec 9.11: chunks per project, hard stop
   const letters = 'abcdefghijklmnopqrstuvwxyz';
@@ -582,7 +639,7 @@ test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, e
   idx.prepare();
   const query = q(text);
   assert.equal(query.words.length, 32);
-  const show = (m) => `wall ${m.wall} ms, cpu ${Math.round(m.cpu)} ms`;
+  const show = (m) => `wall ${Math.round(m.wall)} ms, cpu ${Math.round(m.cpu)} ms`;
   // Robust to machine load (B7 review): a partial result must come from the
   // budget guard (a clock read past the budget), the time from that read to
   // the return is the 250 ms ordering tail, and the whole call fits the
@@ -590,8 +647,8 @@ test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, e
   // CPU time, whichever is smaller. A loop that stops checking the budget
   // runs seconds past it in CPU time too, so it still fails.
   for (const matching of ['exact', 'broad']) {
-    const m = timedRank(idx, query, { matching });
-    t.diagnostic(`${matching}: partial ${m.r.partial}; total ${show(m.total)}; tail ${m.tail ? show(m.tail) : 'none'}`);
+    const m = await timedRank(idx, query, { matching });
+    t.diagnostic(`${matching}: partial ${m.r.partial}; total ${show(m.total)}; tail ${m.tail ? show(m.tail) : 'none'}; gc taken off: past the line ${Math.round(m.gc.past)} ms, in the tail ${Math.round(m.gc.tail)} ms`);
     if (m.r.partial) {
       assert.ok(m.tail, `${matching}: partial, but no clock read reached the budget`);
       assert.ok(own(m.tail) <= TAIL_MS, `${matching}: tail after the budget ran out measured ${show(m.tail)}`);
@@ -605,7 +662,7 @@ test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, e
   }
   // The budget runs out inside the exact pass itself: partial at once, holding the exact hits scored so far.
   for (const matching of ['exact', 'broad']) {
-    const m = timedRank(idx, query, { matching, budgetMs: 0 });
+    const m = await timedRank(idx, query, { matching, budgetMs: 0 });
     t.diagnostic(`${matching}, 0 ms budget: total ${show(m.total)}`);
     assert.equal(m.r.partial, true, matching);
     assert.ok(m.tail, matching + ': the guard tripped');
@@ -613,6 +670,46 @@ test('T-16 (query part, B6 review 2): the hard-stop worst case (50,000 chunks, e
     assert.equal(m.r.results.length, 5);
     for (const res of m.r.results) assert.deepEqual(res.matched_by, ['exact'], matching);
   }
+});
+
+test('T-16 helper: takeOffGc takes off only the pause past the budget line and the pause in the tail', () => {
+  // Fixed numbers, performance clock in ms: the budget line is at 1000, the
+  // guard trips at 1400 (a late read), the call returns at 1450.
+  const base = { budgetLine: 1000, tripP: 1400, endP: 1450, total: { wall: 1450, cpu: 1440 }, tail: { wall: 50, cpu: 48 } };
+  const same = (a, b) => assert.deepEqual(a, b);
+  // A pause that crosses the line (from 1000 to 1380) is taken off the total only.
+  let a = takeOffGc({ ...base, gcs: [{ startTime: 990, duration: 390 }] });
+  same([a.gcPast, a.gcTail], [380, 0]);
+  same(a.total, { wall: 1070, cpu: 1060 });
+  same(a.tail, { wall: 50, cpu: 48 });
+  // A pause wholly before the line is NOT taken off (the code sees it in the clock).
+  a = takeOffGc({ ...base, gcs: [{ startTime: 300, duration: 500 }, { startTime: 950, duration: 50 }] });
+  same([a.gcPast, a.gcTail], [0, 0]);
+  same(a.total, base.total);
+  same(a.tail, base.tail);
+  // A pause inside the tail comes off the tail and the total.
+  a = takeOffGc({ ...base, gcs: [{ startTime: 1410, duration: 30 }] });
+  same([a.gcPast, a.gcTail], [0, 30]);
+  same(a.total, { wall: 1420, cpu: 1410 });
+  same(a.tail, { wall: 20, cpu: 18 });
+  // A pause that starts before the line counts only from the line on; one that
+  // runs past the return counts only up to the return; both kinds add up.
+  a = takeOffGc({ ...base, gcs: [{ startTime: 900, duration: 200 }, { startTime: 1440, duration: 100 }] });
+  same([a.gcPast, a.gcTail], [100, 10]);
+  same(a.total, { wall: 1340, cpu: 1330 });
+  same(a.tail, { wall: 40, cpu: 38 });
+  // Several pauses add up; none: nothing changes.
+  a = takeOffGc({ ...base, gcs: [{ startTime: 1100, duration: 40 }, { startTime: 1200, duration: 60 }] });
+  same([a.gcPast, a.gcTail], [100, 0]);
+  same(takeOffGc({ ...base, gcs: [] }).total, base.total);
+  // A long code overrun with a small pause still fails the limit: 5,000 ms of
+  // code (a 400 ms tail) with a 50 ms pause in it leaves more than 1,250 / 250 ms.
+  a = takeOffGc({ budgetLine: 1000, tripP: 6000, endP: 6400, total: { wall: 6400, cpu: 6390 }, tail: { wall: 400, cpu: 398 }, gcs: [{ startTime: 6100, duration: 50 }] });
+  assert.ok(Math.min(a.total.wall, a.total.cpu) > 1000 + 250);
+  assert.ok(Math.min(a.tail.wall, a.tail.cpu) > 250);
+  // Never more off than measured: clamped at 0.
+  a = takeOffGc({ budgetLine: 0, tripP: 100, endP: 200, total: { wall: 60, cpu: 50 }, tail: { wall: 10, cpu: 8 }, gcs: [{ startTime: 0, duration: 200 }] });
+  same([a.total.wall, a.total.cpu, a.tail.wall, a.tail.cpu], [0, 0, 0, 0]);
 });
 
 test('B6 review: every exact hit is scored before any expansion, so a partial result keeps them all', () => {
