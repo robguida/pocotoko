@@ -45,7 +45,8 @@ function isWindows(platform) {
 // invisible characters; every other Cc, Cf, Zl and Zp character (the class the
 // walker and the envelope use for file names); the whole tag block
 // U+E0000-U+E007F; every default-ignorable code point, except a lone U+FE0E or
-// U+FE0F right after an emoji character (LONE_PRESENTATION_SELECTOR, equal to the meter's).
+// U+FE0F right after an emoji character, for 0-9, # and * only before U+20E3
+// (a keycap) (LONE_PRESENTATION_SELECTOR, equal to the meter's).
 
 const PATH_MAX_CHARS = 1024;
 const UNPRINTABLE_CLASSES = Object.freeze({
@@ -57,7 +58,7 @@ const UNPRINTABLE_CLASSES = Object.freeze({
   tags: '\\u{e0000}-\\u{e007f}',
   ignorable: '\\p{Default_Ignorable_Code_Point}',
 });
-const LONE_PRESENTATION_SELECTOR = '(?<=\\p{Emoji})[\\ufe0e\\ufe0f]';
+const LONE_PRESENTATION_SELECTOR = '(?<![0-9#*])(?<=\\p{Emoji})[\\ufe0e\\ufe0f]|(?<=[0-9#*])\\ufe0f(?=\\u20e3)';
 
 /**
  * Builds the test: true when p may be shown (no character of UNPRINTABLE_CLASSES once a lone

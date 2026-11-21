@@ -785,6 +785,14 @@ test('9.8 / SR-12: the search server\'s copy of the 6.11 f table and cap (server
     if (cp !== 0xfe0e && cp !== 0xfe0f) assert.equal(M.printablePath(afterHeart), false, 'meter after a heart U+' + cp.toString(16));
   }
   assert.ok(refused > 4000, 'the sweep found the classes');
+  // End gate round 3: the keycap bases 0-9, # and * keep U+FE0F only before U+20E3, in both.
+  for (const [P, label] of [[M, 'meter'], [FSX, 'server']]) {
+    for (const base of [...'0123456789#*']) {
+      assert.equal(P.printablePath('/x/' + base + '️⃣'), true, label + ': keycap ' + base);
+      assert.equal(P.printablePath('/x/' + base + '️b'), false, label + ': ' + base + ' + U+FE0F, no keycap');
+      assert.equal(P.printablePath('/x/' + base + '︎⃣'), false, label + ': ' + base + ' + U+FE0E');
+    }
+  }
   for (const ch of ['︎', '️']) {
     for (const [P, label] of [[M, 'meter'], [FSX, 'server']]) {
       assert.equal(P.printablePath('/x/❤' + ch + 'b'), true, label + ': a lone selector after a heart');

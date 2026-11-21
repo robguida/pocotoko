@@ -96,10 +96,12 @@ const UNPRINTABLE_CLASSES = Object.freeze({
 });
 // 6.11 f: the one character of the set that may stand in a printed path: a single U+FE0E or
 // U+FE0F (text or emoji presentation) right after an emoji character (Unicode property Emoji:
-// a heart, a sun, a flag letter, a keycap digit, # or *). Never after a letter, a mark, a
-// punctuation sign, a space or a slash. Two or more variation selectors in a row are never
-// printed: a variation selector is not an emoji character, and every other one is in the table.
-const LONE_PRESENTATION_SELECTOR = '(?<=\\p{Emoji})[\\ufe0e\\ufe0f]';
+// a heart, a sun, a flag letter). The keycap bases 0-9, # and * are emoji characters too, but
+// for them only U+FE0F followed by U+20E3 counts (a real keycap), so a digit cannot carry a
+// hidden selector. Never after a letter, a mark, a punctuation sign, a space or a slash. Two
+// or more variation selectors in a row are never printed: a variation selector is not an
+// emoji character, and every other one is in the table.
+const LONE_PRESENTATION_SELECTOR = '(?<![0-9#*])(?<=\\p{Emoji})[\\ufe0e\\ufe0f]|(?<=[0-9#*])\\ufe0f(?=\\u20e3)';
 
 const SESSION_FILE_RE = /^(?:[a-z0-9_-]{1,64}|h-[0-9a-f]{32})\.json$/;
 // <name>.<pid>.<16 hex>.tmp; group 1 is <name>. Temp cleanup removes a match only when
@@ -977,45 +979,64 @@ function isWindowsNetworkOrDevicePath(p, platform = process.platform) {
 // A stored link target that names another computer or a device: two leading slashes of either
 // kind, or the NT forms `\??\UNC\` and `UNC\` (in case a target is read back undecoded).
 const NETWORK_TARGET_RE = /^(?:[\\/]{2}|\\\?\?\\UNC\\|UNC\\)/i;
-const LINK_DEPTH_MAX = 32;
+// 6.6: the most lstat plus readlink calls one walk may make. An ordinary path (dozens of
+// parts, a few links) needs far fewer; a branching tree of links or a loop runs out and is
+// refused.
+const LINK_WALK_BUDGET = 256;
 
 /**
- * 6.6 (Windows only): true when any part of p, walked from its root down, is a link (a
- * symbolic link or a junction) whose stored target names a network or device path, or a
- * local target that does so in turn. Each part is read with lstat (which never follows the
- * part itself) and each link with readlink, so nothing is resolved and no network connection
- * is made. Fails closed: an lstat error other than not-found, a readlink error, or a chain
- * deeper than LINK_DEPTH_MAX counts as true. A part that does not exist ends the walk (the
- * real-path step then refuses the value). On macOS and Linux a leading // is an ordinary
- * path, so the walk does not run.
+ * 6.6 (Windows only): true when walking p the way the OS resolves it reaches a link (a
+ * symbolic link or a junction) whose stored target names a network or device path. The walk
+ * keeps the folder it has really reached, which never holds a link: each next part is read
+ * with lstat (which never follows that part); a link is read with readlink, and a safe local
+ * target replaces the link, its parts walked next and a relative target read from the real
+ * folder that holds the link. Nothing is resolved by the OS along the way, so no network
+ * connection is made during the walk. Fails closed: an lstat error other than not-found, a
+ * readlink error, a target that is not a drive path, or more than LINK_WALK_BUDGET calls
+ * counts as true. A part that does not exist ends the walk (the real-path step then refuses
+ * the value). On macOS and Linux a leading // is an ordinary path, so the walk does not run.
  */
-function linkToNetwork(p, platform = process.platform, _lstat = fs.lstatSync, _readlink = fs.readlinkSync, depth = 0) {
+function linkToNetwork(p, platform = process.platform, _lstat = fs.lstatSync, _readlink = fs.readlinkSync) {
   if (!isWindows(platform)) return false;
-  if (depth > LINK_DEPTH_MAX) return true;
   const P = pathApi(platform);
   if (typeof p !== 'string' || NETWORK_TARGET_RE.test(p) || !isAbsoluteFor(p, platform)) return true;
-  const root = P.parse(p).root;
-  const parts = p.slice(root.length).split(/[\\/]+/).filter(Boolean);
-  let cur = root;
-  for (const part of parts) {
-    cur = P.join(cur, part);
+  const split = (abs) => {
+    const n = P.resolve(abs);
+    const root = P.parse(n).root;
+    return { root, parts: n.slice(root.length).split(/[\\/]+/).filter(Boolean) };
+  };
+  let { root: cur, parts: rest } = split(p);
+  let budget = LINK_WALK_BUDGET;
+  let i = 0;
+  while (i < rest.length) {
+    const next = P.join(cur, rest[i]);
+    if (--budget < 0) return true;
     let st;
     try {
-      st = _lstat(cur);
+      st = _lstat(next);
     } catch (err) {
       if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return false;
       return true;
     }
-    if (!st.isSymbolicLink()) continue;
+    if (!st.isSymbolicLink()) {
+      cur = next;
+      i++;
+      continue;
+    }
+    if (--budget < 0) return true;
     let target;
     try {
-      target = String(_readlink(cur));
+      target = String(_readlink(next));
     } catch (_) {
       return true;
     }
     if (NETWORK_TARGET_RE.test(target)) return true;
-    const next = P.isAbsolute(target) ? target : P.resolve(P.dirname(cur), target);
-    if (linkToNetwork(next, platform, _lstat, _readlink, depth + 1)) return true;
+    const abs = P.isAbsolute(target) ? target : P.join(cur, target);
+    if (!isAbsoluteFor(abs, platform)) return true;
+    const t = split(abs);
+    cur = t.root;
+    rest = t.parts.concat(rest.slice(i + 1));
+    i = 0;
   }
   return false;
 }
@@ -1028,10 +1049,11 @@ function linkToNetwork(p, platform = process.platform, _lstat = fs.lstatSync, _r
  * input's cwd) or inside any git work tree. The config-folder and project checks run twice:
  * first on the value as written, before its links are resolved (so a link inside the
  * project is refused without being followed), then on its real path. Before the real-path
- * step, on Windows, linkToNetwork walks the value's parts and refuses a link that points at a
- * network or device path, so no link is ever followed to another computer, whatever name form
- * (a short 8.3 name, a link inside some other repo) the value uses. The git check then runs on
- * the real path. Returns { dir } | { refused: true }.
+ * step, on Windows, linkToNetwork walks the value the way the OS resolves it and refuses it
+ * when a link on that way points at a network or device path (a short 8.3 name or a link in
+ * another repo does not hide such a link from the walk). The walk cannot rule out a link
+ * changed between it and the real-path step. The git check then runs on the real path.
+ * Returns { dir } | { refused: true }.
  * _realpath, _lstat, _readlink: test-only seams.
  */
 function resolveHandoffDir(value, { projectDir, cwd, configDir = null, platform = process.platform, gitCeiling = null, _realpath = fs.realpathSync.native, _lstat = fs.lstatSync, _readlink = fs.readlinkSync }) {

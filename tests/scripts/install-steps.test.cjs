@@ -127,10 +127,34 @@ test('12.2 f: the launcher session-start row needs the routing block from the co
   assert.equal(CBH.seamSessionStartOk({ status: 0, hook: null, block }), false, 'no output');
   assert.equal(CBH.seamSessionStartOk({ status: 0, hook: hook(ctx), block: '' }), false, 'an empty block never counts as found');
   assert.equal(CBH.routingBlockOf('no markers'), '');
+  // A start marker with no closing --> anywhere after it (end gate round 3, T-2).
+  assert.equal(CBH.routingBlockOf('<!-- routing-block:start\nrules\n<!-- routing-block:end'), '', 'no --> after the start marker');
+  assert.equal(CBH.routingBlockOf('<!-- routing-block:start\nrules\n<!-- routing-block:end -->'), '', 'the start marker lacks its -->');
   assert.equal(CBH.routingBlockOf('<!-- routing-block:start -->\nrules with no end marker\n'), '', 'no end marker');
   assert.equal(CBH.routingBlockOf('rules\n<!-- routing-block:end -->'), '', 'no start marker');
   assert.equal(CBH.routingBlockOf('<!-- routing-block:start -->\n  the rules  \n<!-- routing-block:end -->'), 'the rules');
   assert.equal(CBH.routingBlockOf('<!-- routing-block:end -->x<!-- routing-block:start -->'), '');
+});
+
+test('12.2 f (end gate round 3, T-1): the plain session-start row inside this repo needs exit 0, the write-nothing line, the git-repo routing line and no routing block', () => {
+  const skill = fs.readFileSync(path.join(REPO_TOP, 'src', 'core', 'skills', 'model-routing', 'SKILL.md'), 'utf8');
+  const block = CBH.routingBlockOf(skill);
+  const IN_GIT = 'PocoToko: your Claude config folder is inside a git repo, so the kit saves nothing there (no meter warnings, no hand-off files). Move the config folder out of the repo to turn them on.';
+  const RULES_IN_GIT = 'Routing rules were not added at session start: the model-routing skill file is inside a git repo, so it was not read.';
+  const hook = (msg, ctx = '') => ({ systemMessage: msg, ...(ctx ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: ctx } } : {}) });
+  const both = IN_GIT + '\n' + RULES_IN_GIT;
+  assert.equal(CBH.plainSessionStartOk({ status: 0, hook: hook(both), block }), true, 'all right');
+  assert.equal(CBH.plainSessionStartOk({ status: 0, hook: hook(both, 'other context'), block }), true, 'other context is fine');
+  assert.equal(CBH.plainSessionStartOk({ status: 0, hook: hook(both, 'x\n' + block), block }), false, 'the block present');
+  assert.equal(CBH.plainSessionStartOk({ status: 0, hook: hook(IN_GIT), block }), false, 'the git-repo routing line missing');
+  assert.equal(CBH.plainSessionStartOk({ status: 0, hook: hook(RULES_IN_GIT), block }), false, 'the write-nothing line missing');
+  assert.equal(CBH.plainSessionStartOk({ status: 1, hook: hook(both), block }), false, 'a non-zero exit');
+  assert.equal(CBH.plainSessionStartOk({ status: 0, hook: hook(both), block: '' }), false, 'an empty block');
+  assert.equal(CBH.plainSessionStartOk({ status: 0, hook: null, block }), false, 'no output');
+  // The two lines the row needs are the hooks' own fixed lines, word for word.
+  const S = require(path.join(REPO_TOP, 'src', 'core', 'hooks', 'session-start.cjs'));
+  assert.equal(S.LINES.IN_GIT, IN_GIT);
+  assert.equal(S.LINES.RULES_IN_GIT, RULES_IN_GIT);
 });
 
 // ---------------------------------------------------------------------------

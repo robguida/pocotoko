@@ -158,10 +158,7 @@ function fireThroughSettings(run, env, values, shells, shellName, log) {
       // read (6.11 h): the git-repo routing line comes instead of the block. The launcher run
       // below (a git ceiling at the run folder) is where the block is seen.
       const block = routingBlockOf(fs.readFileSync(path.join(run.L.config, 'skills', 'model-routing', 'SKILL.md'), 'utf8'));
-      const msg = String((j && j.systemMessage) || '');
-      ok = ok && j && /your Claude config folder is inside a git repo/.test(msg)
-        && msg.includes('the model-routing skill file is inside a git repo, so it was not read.')
-        && !String((j.hookSpecificOutput || {}).additionalContext || '').includes(block);
+      ok = ok && plainSessionStartOk({ status: r.status, hook: j, block });
       what += j ? ', write-nothing line (git work tree) + the git-repo routing line, no block' : ', no output';
     } else {
       ok = ok && j === null;
@@ -205,6 +202,21 @@ export function seamSessionStartOk({ status, hook, block }) {
   const ctx = String((j.hookSpecificOutput || {}).additionalContext || '');
   return status === 0 && !j.systemMessage && ctx.includes('Hand-off folder for this session: ')
     && typeof block === 'string' && block !== '' && ctx.includes(block);
+}
+
+/**
+ * The plain (no launcher) session-start run inside this repo's work tree is right only when it
+ * exits 0, its systemMessage holds both the write-nothing line (6.7) and the git-repo routing
+ * line (6.11 h), and its context does not hold the routing block read from the copied skill
+ * (12.2 f). An empty block fails: every context "includes" the empty string.
+ */
+export function plainSessionStartOk({ status, hook, block }) {
+  if (status !== 0 || !hook || typeof hook !== 'object' || typeof block !== 'string') return false;
+  const msg = String(hook.systemMessage || '');
+  const ctx = String((hook.hookSpecificOutput || {}).additionalContext || '');
+  return /your Claude config folder is inside a git repo/.test(msg)
+    && msg.includes('the model-routing skill file is inside a git repo, so it was not read.')
+    && !ctx.includes(block);
 }
 
 /** Node run only: the hooks through the test launcher with a git ceiling, so they really write (then uninstall must remove it all). */

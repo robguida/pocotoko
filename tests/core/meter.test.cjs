@@ -658,6 +658,7 @@ test('6.6 (end gate round 2, R2-2): on Windows a link anywhere in handoff_dir wh
     ['long-path UNC', BS + BS + '?' + BS + 'UNC' + BS + NET_HOST + BS + 'share'],
     ['NT form', BS + '??' + BS + 'UNC' + BS + NET_HOST + BS + 'share'],
     ['NT form without the prefix', 'UNC' + BS + NET_HOST + BS + 'share'],
+    ['NT form, lower case', 'unc' + BS + NET_HOST + BS + 'share'],
     ['device form', BS + BS + '.' + BS + 'pipe' + BS + 'x'],
   ]) {
     // The 8.3 name of the project: the text fence cannot see it is the project.
@@ -699,11 +700,92 @@ test('6.6 (end gate round 2, R2-2): on Windows a link anywhere in handoff_dir wh
   assert.deepEqual(resolve('D:' + BS + 'notes-link', local), { refused: true });
   assert.equal(local.calls.realpath.length, 1, 'a local link: resolved as before');
   assert.ok(local.calls.lstat.some((p) => p.toLowerCase() === ('E:' + BS + 'notes').toLowerCase()), 'its target was walked too');
+  // End gate round 3, R3-1: a relative target is read from the folder really reached, not the
+  // path as written. C:\a\J is a junction to D:\deep\dir; there R is a relative link ..\N; and
+  // D:\deep\N is a link to the network. (C:\a\N, the as-written answer, is a plain folder.)
+  const viaJunction = fakeFs({ links: {
+    ['C:' + BS + 'a' + BS + 'J']: 'D:' + BS + 'deep' + BS + 'dir',
+    ['D:' + BS + 'deep' + BS + 'dir' + BS + 'R']: '..' + BS + 'N',
+    ['D:' + BS + 'deep' + BS + 'N']: NET,
+  } });
+  assert.deepEqual(resolve('C:' + BS + 'a' + BS + 'J' + BS + 'R' + BS + 'x', viaJunction), { refused: true }, 'junction, then a relative link');
+  assert.deepEqual(viaJunction.calls.realpath, []);
+  assert.ok(viaJunction.calls.lstat.some((p) => p === 'D:' + BS + 'deep' + BS + 'N'), 'the folder really reached was read');
+  assert.ok(!viaJunction.calls.lstat.some((p) => p === 'C:' + BS + 'a' + BS + 'J' + BS + 'R' + BS + 'x'), 'nothing was opened through the links');
+  // The same with relative links only, inside one repo: a\R1 -> sub\deeper, there R2 -> ..\..\N, N -> network.
+  const relOnly = fakeFs({ links: {
+    ['D:' + BS + 'repo' + BS + 'a' + BS + 'R1']: 'sub' + BS + 'deeper',
+    ['D:' + BS + 'repo' + BS + 'a' + BS + 'sub' + BS + 'deeper' + BS + 'R2']: '..' + BS + '..' + BS + 'N',
+    ['D:' + BS + 'repo' + BS + 'a' + BS + 'N']: NET,
+  } });
+  assert.deepEqual(resolve('D:' + BS + 'repo' + BS + 'a' + BS + 'R1' + BS + 'R2' + BS + 'x', relOnly), { refused: true }, 'relative links only');
+  assert.deepEqual(relOnly.calls.realpath, []);
+  // A local relative chain that ends at a plain folder: walked, then resolved as before.
+  const relSafe = fakeFs({ links: { ['D:' + BS + 'a' + BS + 'R']: '..' + BS + 'b' } });
+  assert.deepEqual(resolve('D:' + BS + 'a' + BS + 'R' + BS + 'x', relSafe), { refused: true });
+  assert.equal(relSafe.calls.realpath.length, 1, 'a safe relative chain: resolved as before');
+  assert.ok(relSafe.calls.lstat.includes('D:' + BS + 'b' + BS + 'x'), 'the rest is walked from the folder reached');
+  // A stored target that is not a drive path (rooted with no drive, an NT volume or device
+  // name) refuses the value without walking or resolving anything more.
+  for (const target of [BS + 'x' + BS + 'y', BS + '??' + BS + 'Volume{0000}' + BS + 'x', BS + 'Device' + BS + 'Mup' + BS + NET_HOST + BS + 'share']) {
+    const odd = fakeFs({ links: { ['D:' + BS + 'odd']: target } });
+    assert.deepEqual(resolve('D:' + BS + 'odd' + BS + 'n', odd), { refused: true }, 'not a drive path: ' + target);
+    assert.deepEqual(odd.calls.realpath, [], 'not a drive path, nothing resolved: ' + target);
+    assert.deepEqual(odd.calls.lstat, ['D:' + BS + 'odd'], 'not a drive path, no more parts walked: ' + target);
+  }
+  // End gate round 3, R3-2: one budget for all calls. The review's branching shape: a link named
+  // L<k> points at a path of 8 links named L<k-1>, 6 levels (8^6 parts if walked in full); L0 is
+  // a plain folder. It is refused after at most the budget of calls, quickly.
+  const branch = (width, levels) => {
+    const calls = { lstat: 0, readlink: 0, realpath: 0 };
+    const name = (p) => p.split(BS).pop();
+    return {
+      calls,
+      lstat: (p) => { calls.lstat++; return { isSymbolicLink: () => /^L[1-9][0-9]*$/.test(name(p)) }; },
+      readlink: (p) => { calls.readlink++; const k = Number(name(p).slice(1)); return ['C:', ...Array(width).fill('L' + (k - 1))].join(BS); },
+      realpath: () => { calls.realpath++; throw Object.assign(new Error('stop'), { code: 'ENOENT' }); },
+    };
+  };
+  const wide = branch(8, 6);
+  const t0 = Date.now();
+  assert.deepEqual(resolve('C:' + BS + 'L6', wide), { refused: true }, 'the 8 by 6 shape is refused');
+  assert.ok(wide.calls.lstat + wide.calls.readlink <= 256, 'at most the budget of calls: ' + (wide.calls.lstat + wide.calls.readlink));
+  assert.ok(Date.now() - t0 < 1000, 'and quickly');
+  assert.equal(wide.calls.realpath, 0, 'nothing resolved');
+  // A small branching shape inside the budget is walked to the end (3 by 2: 13 parts).
+  const small = branch(3, 2);
+  assert.deepEqual(resolve('C:' + BS + 'L2', small), { refused: true });
+  assert.equal(small.calls.realpath, 1, 'a small shape: walked in full, then resolved');
+  // An ordinary deep path with a few local links stays well inside the budget.
+  const parts = Array.from({ length: 40 }, (_, j) => 'p' + j);
+  const deepLinks = {};
+  for (const j of [5, 15, 25]) deepLinks[['D:', ...parts.slice(0, j + 1)].join(BS)] = ['E:', 'm' + j].join(BS);
+  const ordinary = fakeFs({ links: deepLinks });
+  assert.deepEqual(resolve(['D:', ...parts].join(BS), ordinary), { refused: true });
+  assert.equal(ordinary.calls.realpath.length, 1, 'an ordinary deep path: walked to the end, then resolved');
   // macOS and Linux: no walk (a leading // is an ordinary path there).
   const posix = fakeFs({ links: { '/x/l': NET } });
   assert.equal(M.linkToNetwork('/x/l', 'linux', posix.lstat, posix.readlink), false);
   assert.equal(M.linkToNetwork('/x/l', 'darwin', posix.lstat, posix.readlink), false);
   assert.deepEqual(posix.calls.lstat, [], 'no walk on POSIX');
+});
+
+test('6.6 (end gate round 3, R3-2, child process): a handoff_dir through a loop of two local links is refused quickly: exit 0, no blocking field, the refusal line once, nothing on stderr', () => {
+  const b = H.makeBase('hdir-loop');
+  const kit = H.copyKit(b);
+  // j1 -> <base>/j2/in and j2 -> <base>/j1/in: each turn makes the path longer (Windows: the
+  // walk's budget ends it; macOS and Linux: the real-path step gives ELOOP or a too-long name).
+  H.dirLink(path.join(b.base, 'j2', 'in'), path.join(b.base, 'j1'));
+  H.dirLink(path.join(b.base, 'j1', 'in'), path.join(b.base, 'j2'));
+  writeConfig(kit, { handoff_dir: path.join(b.base, 'j1', 'notes') });
+  const t = H.writeTranscript(b, 150000);
+  const r = R.runMeter(b, { scriptFile: kit.scriptFile, input: JSON.stringify(H.promptInput(b, t)), env: H.copyEnv(b) });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
+  assert.ok(r.ms < 2500, 'inside the self-kill time: ' + r.ms + ' ms');
+  const out = JSON.parse(r.text);
+  noBlocking(out);
+  assert.equal(out.systemMessage.split(M.LINES.HANDOFF_DIR_REFUSED).length, 2, 'the refusal line once');
 });
 
 test('6.6 / SR-C6 (L-3, child process, Windows): the long-path forms of a real local folder (\\\\?\\ and //?/) are refused, default used, exit 0 (local only, no network)', { skip: !IS_WIN && 'Windows path forms only: on macOS and Linux a leading // is an ordinary path (tested as strings above)' }, () => {
