@@ -990,10 +990,12 @@ const LINK_WALK_BUDGET = 256;
  * keeps the folder it has really reached, which never holds a link: each next part is read
  * with lstat (which never follows that part); a link is read with readlink, and a safe local
  * target replaces the link, its parts walked next and a relative target read from the real
- * folder that holds the link. Nothing is resolved by the OS along the way, so no network
- * connection is made during the walk. Fails closed: an lstat error other than not-found, a
- * readlink error, a target that is not a drive path, or more than LINK_WALK_BUDGET calls
- * counts as true. A part that does not exist ends the walk (the real-path step then refuses
+ * folder that holds the link. No link is followed by the OS along the way, so the walk makes
+ * no network connection, except through a drive letter mapped to a share (treated as a local
+ * drive, 6.6). Fails closed: an lstat error other than not-found, a readlink error, a target
+ * that is not a drive path, a relative target holding a colon, or more than LINK_WALK_BUDGET
+ * calls (a loop, a branching tree of links, or a plain path of more than 256 parts) counts as
+ * true. A part that does not exist ends the walk (the real-path step then refuses
  * the value). On macOS and Linux a leading // is an ordinary path, so the walk does not run.
  */
 function linkToNetwork(p, platform = process.platform, _lstat = fs.lstatSync, _readlink = fs.readlinkSync) {
@@ -1031,6 +1033,7 @@ function linkToNetwork(p, platform = process.platform, _lstat = fs.lstatSync, _r
       return true;
     }
     if (NETWORK_TARGET_RE.test(target)) return true;
+    if (!P.isAbsolute(target) && target.includes(':')) return true; // a drive-relative or stream form: not guessed
     const abs = P.isAbsolute(target) ? target : P.join(cur, target);
     if (!isAbsoluteFor(abs, platform)) return true;
     const t = split(abs);

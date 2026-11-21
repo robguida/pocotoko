@@ -157,6 +157,20 @@ test('12.2 f (end gate round 3, T-1): the plain session-start row inside this re
   assert.equal(S.LINES.RULES_IN_GIT, RULES_IN_GIT);
 });
 
+test('12.2 f (end gate round 4, U-2): the --check rows are wired to their judges: the plain session-start row to plainSessionStartOk, the launcher row to seamSessionStartOk', () => {
+  const src = fs.readFileSync(path.join(REPO_TOP, 'scripts', 'copy-by-hand.mjs'), 'utf8');
+  const count = (s) => src.split(s).length - 1;
+  // The plain row (fireThroughSettings): its ok takes the judge's answer.
+  assert.equal(count('ok = ok && plainSessionStartOk({ status: r.status, hook: j, block });'), 1, 'the plain row calls plainSessionStartOk');
+  // The launcher row (fireWithCeiling): its status comes from the judge's answer.
+  assert.equal(count('const okSs = seamSessionStartOk({ status: ss.status, hook: j, block });'), 1, 'the launcher row calls seamSessionStartOk');
+  assert.equal(count("status: okSs ? 'done' : 'failed'"), 1, 'the launcher row reports the judge');
+  // Each judge is called only there (the definitions read "({ status, hook"), so no other path
+  // stands in for it.
+  assert.equal(count('plainSessionStartOk({ status: '), 1);
+  assert.equal(count('seamSessionStartOk({ status: '), 1);
+});
+
 // ---------------------------------------------------------------------------
 // Rendering (12.2 b)
 

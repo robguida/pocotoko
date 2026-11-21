@@ -770,6 +770,77 @@ test('6.6 (end gate round 2, R2-2): on Windows a link anywhere in handoff_dir wh
   assert.deepEqual(posix.calls.lstat, [], 'no walk on POSIX');
 });
 
+// End gate round 4, U-1: the budget is exactly 256 calls (spec 6.6), pinned from both sides.
+// Fake file system only (pure strings, Windows rules, every OS).
+function budgetFake(links = {}) {
+  const calls = { lstat: 0, readlink: 0, realpath: 0 };
+  return {
+    calls,
+    lstat: (p) => { calls.lstat++; return { isSymbolicLink: () => Object.prototype.hasOwnProperty.call(links, p) }; },
+    readlink: (p) => { calls.readlink++; return links[p]; },
+    realpath: () => { calls.realpath++; throw Object.assign(new Error('stop'), { code: 'ENOENT' }); },
+  };
+}
+const budgetRun = (value, f) => M.resolveHandoffDir(value, { projectDir: '', cwd: '', platform: 'win32', _realpath: f.realpath, _lstat: f.lstat, _readlink: f.readlink });
+
+test('6.6 (end gate round 4, U-1): the walk budget edge: 256 plain parts are walked to the end (256 calls); 257 are refused before resolving', () => {
+  const at = budgetFake();
+  budgetRun(['D:', ...Array(256).fill('p')].join(BS), at);
+  assert.equal(at.calls.lstat + at.calls.readlink, 256);
+  assert.equal(at.calls.realpath, 1, '256 calls: walked to the end, then resolved');
+  const over = budgetFake();
+  budgetRun(['D:', ...Array(257).fill('p')].join(BS), over);
+  assert.equal(over.calls.realpath, 0, '257 calls: refused before resolving');
+});
+
+test('6.6 (end gate round 4, U-1): the budget edge with a link: 254 parts + one link (readlink counted) + its 1 target part = 256 calls pass; one more refuses', () => {
+  const mk = (n) => {
+    const parts = Array(n).fill('p');
+    const linkAt = ['D:', ...parts.slice(0, 10)].join(BS);
+    return { value: ['D:', ...parts].join(BS), links: { [linkAt]: 'E:' + BS + 't' } };
+  };
+  // n parts with a link at part 10: lstat n + readlink 1 + lstat of E:\t 1 = n + 2 calls.
+  const a = mk(254);
+  const fa = budgetFake(a.links);
+  budgetRun(a.value, fa);
+  assert.equal(fa.calls.lstat + fa.calls.readlink, 256);
+  assert.equal(fa.calls.realpath, 1);
+  const b = mk(255);
+  const fb = budgetFake(b.links);
+  budgetRun(b.value, fb);
+  assert.equal(fb.calls.realpath, 0);
+  // The readlink as the 256th call: 255 parts, the last a link to a drive root (no parts left).
+  const last = (n) => {
+    const value = ['D:', ...Array(n).fill('p')].join(BS);
+    return { value, links: { [value]: 'E:' + BS } };
+  };
+  const c = last(255);
+  const fc = budgetFake(c.links);
+  budgetRun(c.value, fc);
+  assert.equal(fc.calls.lstat + fc.calls.readlink, 256);
+  assert.equal(fc.calls.readlink, 1);
+  assert.equal(fc.calls.realpath, 1, 'the readlink as the 256th call: walked, then resolved');
+  const d = last(256);
+  const fd = budgetFake(d.links);
+  budgetRun(d.value, fd);
+  assert.equal(fd.calls.realpath, 0, 'the readlink as the 257th call: refused');
+});
+
+test('6.6 (end gate round 4, N4-3): a relative link target holding a colon (a drive-relative or stream form) refuses the value without being joined as a name (fake file system)', () => {
+  for (const target of ['C:foo', 'foo:bar', '..' + BS + 'x:y']) {
+    const link = 'C:' + BS + 'a' + BS + 'l';
+    const f = fakeFs({ links: { [link]: target } });
+    const out = M.resolveHandoffDir(link + BS + 'x', { projectDir: '', cwd: '', platform: 'win32', _realpath: f.realpath, _lstat: f.lstat, _readlink: f.readlink });
+    assert.deepEqual(out, { refused: true }, target);
+    assert.deepEqual(f.calls.realpath, [], target + ': nothing resolved');
+    assert.deepEqual(f.calls.lstat, ['C:' + BS + 'a', link], target + ': nothing walked after the link');
+  }
+  // An absolute drive target still is walked.
+  const ok = fakeFs({ links: { ['C:' + BS + 'a' + BS + 'l']: 'D:' + BS + 'b' } });
+  M.resolveHandoffDir('C:' + BS + 'a' + BS + 'l', { projectDir: '', cwd: '', platform: 'win32', _realpath: ok.realpath, _lstat: ok.lstat, _readlink: ok.readlink });
+  assert.equal(ok.calls.realpath.length, 1, 'a drive target: walked, then resolved');
+});
+
 test('6.6 (end gate round 3, R3-2, child process): a handoff_dir through a loop of two local links is refused quickly: exit 0, no blocking field, the refusal line once, nothing on stderr', () => {
   const b = H.makeBase('hdir-loop');
   const kit = H.copyKit(b);
