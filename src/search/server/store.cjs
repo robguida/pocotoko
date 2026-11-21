@@ -161,7 +161,8 @@ function bump(map, key, n = 1) {
  *           beforeLoad, onLoadRecord, afterLoad } (all test-only),
  *   platform, uid (test-only seam for the owner check),
  *   rulesVersion (test-only: stands in for floor.RULES_VERSION),
- *   ignorePlatform (test-only: the platform the ignore matcher folds case for)
+ *   ignorePlatform (test-only: the platform the ignore matcher folds case for),
+ *   offLstat (test-only: stands in for fs.lstatSync in the OFF file check)
  * }
  */
 function createStore(opts) {
@@ -174,6 +175,7 @@ function createStore(opts) {
   const platform = opts.platform || process.platform;
   const lockToken = { pid: identity.pid, start: identity.start, nonce: crypto.randomBytes(8).toString('hex') };
   const rulesVersion = opts.rulesVersion || floor.RULES_VERSION; // opts.rulesVersion: test-only seam
+  const offLstat = typeof opts.offLstat === 'function' ? opts.offLstat : fs.lstatSync; // opts.offLstat: test-only seam
 
   const st = {
     off: null, // reason when off (location, folder checks)
@@ -262,14 +264,19 @@ function createStore(opts) {
     return fsx.cleanTemps(st.dataReal, indexParts(), { bases: INDEX_TEMP_BASES, platform, ...extra });
   }
 
+  /**
+   * 9.6: the emergency OFF file. Fails closed: only not-found (ENOENT, ENOTDIR)
+   * means there is no OFF file; any other lstat error counts as off.
+   */
   function isOff() {
     if (st.off) return st.off;
     if (!st.dataReal) return null;
     try {
-      fs.lstatSync(path.join(st.dataReal, OFF_FILE));
+      offLstat(path.join(st.dataReal, OFF_FILE));
       return 'off_file';
-    } catch (_) {
-      return null;
+    } catch (err) {
+      if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) return null;
+      return 'off_file';
     }
   }
 

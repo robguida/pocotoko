@@ -77,6 +77,8 @@ const LINES = Object.freeze({
   SOURCE_FOLDER: 'Search is off: the server runs from a plugin source folder (a developer install, or the plugin cache location was not passed to it), so it stores nothing. Install from a git source or copy by hand to turn it on.',
   // SR-12: shown in place of a bound folder whose path holds a never-term.
   FOLDER_MASKED: '(not shown: the folder path holds one of your never-terms)',
+  // 9.8, SR-12 (the 6.11 f rule): shown in place of a bound folder that cannot be shown safely.
+  FOLDER_UNPRINTABLE: '(not shown: the folder path holds a character that cannot be shown safely, or is over 1,024 characters)',
 });
 
 // SR-12: the skip report's line for paths it does not print, one per rule:
@@ -265,6 +267,7 @@ function createServer({ env = process.env, cwd = process.cwd(), serverFile = __f
     bound: false,
     rootReal: null,
     rootMasked: false, // the bound folder's path holds a never-term (SR-12)
+    rootUnprintable: false, // the bound folder's path fails the 6.11 f rule (9.8)
     reason: null,
     install: null,
     options: {},
@@ -320,6 +323,7 @@ function createServer({ env = process.env, cwd = process.cwd(), serverFile = __f
     if (refused) { s.reason = refused; return; }
     s.rootReal = root.rootReal;
     s.rootMasked = floor.termHit(floor.buildFilter(s.options), root.rootReal);
+    s.rootUnprintable = !fsx.printablePath(root.rootReal);
     const sw = binder.projectSwitch(root.rootReal, s.options.projects, ctx);
     s.switchInfo = sw;
     if (sw.listRefused) { s.reason = binder.REASONS.LIST_UNSAFE; return; }
@@ -452,6 +456,14 @@ function createServer({ env = process.env, cwd = process.cwd(), serverFile = __f
     return s.install.mode === 'copy' ? 'copy-by-hand' : s.install.mode;
   }
 
+  /** 9.8, SR-12: the bound folder as status shows it: none, a fixed mask, or the path. */
+  function boundFolderText() {
+    if (!s.rootReal) return s.rootReal;
+    if (s.rootMasked) return LINES.FOLDER_MASKED;
+    if (s.rootUnprintable) return LINES.FOLDER_UNPRINTABLE;
+    return s.rootReal;
+  }
+
   function toolStatus() {
     const st = s.store ? s.store.status() : null;
     const warnings = [...launch.problems, ...s.warnings];
@@ -465,7 +477,7 @@ function createServer({ env = process.env, cwd = process.cwd(), serverFile = __f
       if (st.rebuild && !st.rebuild.done) warnings.push('index is being rebuilt from source: ' + st.rebuild.reason);
     }
     const payload = {
-      bound_folder: s.rootReal && s.rootMasked ? LINES.FOLDER_MASKED : s.rootReal,
+      bound_folder: boundFolderText(),
       state,
       reason: reason || null,
       install_mode: installLabel(),

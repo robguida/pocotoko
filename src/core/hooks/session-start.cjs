@@ -22,7 +22,7 @@ const LIMITS = Object.freeze({
   INJECT_MAX_CHARS: 10000, // 6.11: Claude Code moves longer hook context into a file
   SKILL_MAX_BYTES: 256 * 1024, // 6.11 e: the skill file; larger counts as unreadable
   USER_RULES_MAX_BYTES: 1024 * 1024, // 6.11 e: the first part of the user CLAUDE.md searched for the marker
-  PATH_MAX_CHARS: 1024, // 6.11 f: a longer path is never printed
+  PATH_MAX_CHARS: M.LIMITS.PATH_MAX_CHARS, // 6.11 f: a longer path is never printed (the meter's cap)
 });
 
 const MARK_START = '<!-- routing-block:start -->';
@@ -56,28 +56,13 @@ const BLOCK_LINES = Object.freeze({
 const C = fs.constants;
 const O_NONBLOCK = C.O_NONBLOCK || 0;
 
-// 6.11 f, the exact set never printed in a path: C0 and C1 controls; line and paragraph
-// separators; bidi controls (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069);
-// zero-width and invisible characters (U+200B-U+200D, U+2060, U+FEFF).
-const UNPRINTABLE_CLASSES = Object.freeze({
-  controls: '\\u0000-\\u001f\\u007f-\\u009f',
-  separators: '\\u2028\\u2029',
-  bidi: '\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069',
-  zero_width: '\\u200b-\\u200d\\u2060\\ufeff',
-});
-const UNPRINTABLE_RE = new RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
+// 6.11 f: the exact set never printed in a path and the 1,024-character cap live in
+// meter.cjs (the meter checks the note path with the same rule, 6.6 a).
+const UNPRINTABLE_CLASSES = M.UNPRINTABLE_CLASSES;
+const printablePath = M.printablePath;
 
 function nonEmpty(v) {
   return typeof v === 'string' && v.trim() !== '';
-}
-
-/**
- * 6.11 f: a path may be printed only when it holds no character of UNPRINTABLE_CLASSES and
- * is at most 1,024 characters.
- */
-function printablePath(p) {
-  if (typeof p !== 'string' || p === '' || p.length > LIMITS.PATH_MAX_CHARS) return false;
-  return !UNPRINTABLE_RE.test(p);
 }
 
 /**

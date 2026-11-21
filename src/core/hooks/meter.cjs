@@ -54,6 +54,7 @@ const LIMITS = Object.freeze({
   NOTE_NAME_MAX: 80, // 6.6: before `.md`
   NOTE_FOLDER_PART_MAX: 40,
   NOTE_SESSION_PART: 8,
+  PATH_MAX_CHARS: 1024, // 6.6 a, 6.11 f: a longer path is never printed
 });
 
 /** Environment prefix Claude Code uses for plugin options in hook commands (spec 3.1 fact 2). */
@@ -69,7 +70,20 @@ const LINES = Object.freeze({
   PLUGIN_DATA_IGNORED: 'chat-length meter: CLAUDE_PLUGIN_DATA is set, but this copy runs outside the plugin cache, so the variable was ignored and the kit folder is used.',
   NOTE_CLASH: 'chat-length meter: no new hand-off note file could be created (the names up to -9 are taken), so no note was requested.',
   NOTE_FAILED: 'chat-length meter: the hand-off note file could not be created, so no note was requested.',
+  NOTE_UNPRINTABLE: 'chat-length meter: the hand-off folder path holds a character that cannot be shown safely, or is over 1,024 characters, so no note file was pre-created and no note was requested.',
 });
+
+// 6.11 f, the exact set never printed in a path (used by the meter, 6.6 a, and by
+// session-start.cjs): C0 and C1 controls; line and paragraph separators; bidi controls
+// (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069); zero-width and invisible
+// characters (U+200B-U+200D, U+2060, U+FEFF).
+const UNPRINTABLE_CLASSES = Object.freeze({
+  controls: '\\u0000-\\u001f\\u007f-\\u009f',
+  separators: '\\u2028\\u2029',
+  bidi: '\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069',
+  zero_width: '\\u200b-\\u200d\\u2060\\ufeff',
+});
+const UNPRINTABLE_RE = new RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
 
 const SESSION_FILE_RE = /^(?:[a-z0-9_-]{1,64}|h-[0-9a-f]{32})\.json$/;
 // <name>.<pid>.<16 hex>.tmp; group 1 is <name>. Temp cleanup removes a match only when
@@ -95,6 +109,15 @@ const FILE_MODE = 0o600;
 
 function nonEmpty(v) {
   return typeof v === 'string' && v.trim() !== '';
+}
+
+/**
+ * 6.6 a, 6.11 f: a path may be printed only when it holds no character of
+ * UNPRINTABLE_CLASSES and is at most 1,024 characters.
+ */
+function printablePath(p) {
+  if (typeof p !== 'string' || p === '' || p.length > LIMITS.PATH_MAX_CHARS) return false;
+  return !UNPRINTABLE_RE.test(p);
 }
 
 function isWindows(platform) {
@@ -1036,9 +1059,16 @@ function handlePrompt(input, ctx) {
           }
           const startFolder = nonEmpty(env.CLAUDE_PROJECT_DIR) ? env.CLAUDE_PROJECT_DIR : (typeof input.cwd === 'string' ? input.cwd : '');
           const base = noteBaseName(ctx.now ? ctx.now() : new Date(nowMs), startFolder, sid);
-          const made = dir ? precreateNote(dir, expected, base, platform) : { error: 'folder' };
-          if (made.file) note = made.file;
-          else notices.push(made.error === 'clash' ? LINES.NOTE_CLASH : LINES.NOTE_FAILED);
+          // 6.6 a, 6.11 f (MUST): the note path is named to Claude and the user, so it is
+          // checked before the pre-create, at the longest name the clash numbering can give.
+          // A path that fails: no file, no path named, said once; the warning still fires.
+          if (dir && !printablePath(path.join(dir, base + '-' + LIMITS.NOTE_CLASH_MAX + '.md'))) {
+            tellOnce('note_path', LINES.NOTE_UNPRINTABLE);
+          } else {
+            const made = dir ? precreateNote(dir, expected, base, platform) : { error: 'folder' };
+            if (made.file) note = made.file;
+            else notices.push(made.error === 'clash' ? LINES.NOTE_CLASH : LINES.NOTE_FAILED);
+          }
         }
         context = hardText(r.size, opts, note);
         message = `chat-length meter: the chat is about ${fmtSize(r.size)} tokens (new-session size ${fmtSize(opts.hard_tokens)}). Finish this step, then start a new session.`
@@ -1309,6 +1339,8 @@ module.exports = {
   LIMITS,
   LINES,
   ENV_PREFIX,
+  UNPRINTABLE_CLASSES,
+  printablePath,
   SESSION_FILE_RE,
   TEMP_NAME_RE,
   DEFAULT_COMPACTION,

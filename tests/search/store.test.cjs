@@ -829,6 +829,34 @@ test('a file named OFF in the data root turns search off; removing it turns sear
   assert.equal(r2.results.length, 1);
 });
 
+test('9.6: the OFF check fails closed: an lstat error other than ENOENT/ENOTDIR on <data root>/OFF counts as off (off_file); ENOENT and ENOTDIR mean on', async () => {
+  const run = makeRun('off-err', { 'a.md': '# A\ndeploy\n' });
+  let code = null;
+  const offLstat = (p) => {
+    if (code && path.basename(p) === St.OFF_FILE) {
+      const e = new Error('seam ' + code);
+      e.code = code;
+      throw e;
+    }
+    return fs.lstatSync(p);
+  };
+  const store = openStore(run, { offLstat });
+  await store.refresh();
+  for (const c of ['EACCES', 'EPERM', 'EIO', 'ELOOP', 'ENAMETOOLONG']) {
+    code = c;
+    const r = await store.search('deploy');
+    assert.equal(r.state, 'off', c);
+    assert.equal(r.reason, 'off_file', c);
+    assert.equal(store.status().state, 'off', c);
+  }
+  for (const c of ['ENOENT', 'ENOTDIR']) {
+    code = c;
+    const r = await store.search('deploy');
+    assert.equal(r.state, 'fresh', c);
+    assert.equal(r.results.length, 1, c);
+  }
+});
+
 test('T-29: file, text and chunk hard limits stop the build, keep what they have and say so; the soft target warns', async () => {
   const files = {};
   for (let i = 0; i < 6; i++) files[`n${i}.md`] = `# N${i}\ndeploy ${i}\n\n## More\ntext\n`;

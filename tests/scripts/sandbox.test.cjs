@@ -115,18 +115,32 @@ test('13.7: the child environment drops every git variable, shell start files, t
   }
 });
 
-test('13.7: started from inside a git hook (GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE pointing at another repo), the git-source build touches only its own sandbox repo', () => {
+test('13.7: started from inside a git hook (GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE pointing at another repo), the git-source build touches only its own sandbox repo', async () => {
+  const { pathToFileURL } = require('node:url');
+  const D = await import(pathToFileURL(path.join(REPO_TOP, 'scripts', 'lib', 'dev-run.mjs')).href);
   const dir = makeTempDir('gitdir-decoy');
   made.push(dir);
   const decoy = path.join(dir, 'decoy');
   fs.mkdirSync(decoy);
-  const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: path.join(dir, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' };
+  // Git by absolute path in a clean environment (no outside git variable), as the scripts do.
+  const gitEnv = { ...D.cleanBaseEnv(process.env), GIT_CONFIG_GLOBAL: path.join(dir, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1' };
   fs.writeFileSync(gitEnv.GIT_CONFIG_GLOBAL, '');
-  for (const k of Object.keys(gitEnv)) if (/^GIT_(?!CONFIG_)/.test(k)) delete gitEnv[k];
-  const git = (args, cwd) => spawnSync('git', args, { cwd, env: gitEnv, encoding: 'utf8' });
+  const gitExe = D.findGit(gitEnv);
+  assert.ok(gitExe && path.isAbsolute(gitExe), 'git found by absolute path');
+  const git = (args, cwd) => spawnSync(gitExe, args, { cwd, env: gitEnv, encoding: 'utf8', windowsHide: true });
   assert.equal(git(['init', '-q', decoy], dir).status, 0);
+  // This repo's git folder and index, asked of git: in a linked worktree `.git` is a file.
+  const ask = (...args) => {
+    const r = git(args, REPO_TOP);
+    assert.equal(r.status, 0, args.join(' ') + ': ' + r.stderr);
+    return r.stdout.trim();
+  };
+  const gitDir = ask('rev-parse', '--absolute-git-dir');
+  const indexFile = path.resolve(REPO_TOP, ask('rev-parse', '--git-path', 'index'));
+  const headFile = path.join(gitDir, 'HEAD');
   const realHead = git(['rev-parse', 'HEAD'], REPO_TOP).stdout;
-  const realIndex = fs.readFileSync(path.join(REPO_TOP, '.git', 'index'));
+  const realHeadFile = fs.readFileSync(headFile);
+  const realIndex = fs.readFileSync(indexFile);
   const child = path.join(dir, 'child.mjs');
   fs.writeFileSync(child, [
     "import { pathToFileURL } from 'node:url';",
@@ -148,7 +162,8 @@ test('13.7: started from inside a git hook (GIT_DIR, GIT_WORK_TREE and GIT_INDEX
   assert.notEqual(git(['rev-parse', '--verify', '-q', 'HEAD'], decoy).status, 0, 'the decoy repo got no commit');
   assert.ok(!fs.existsSync(path.join(decoy, '.git', 'index')), 'the decoy repo got no index');
   assert.equal(git(['rev-parse', 'HEAD'], REPO_TOP).stdout, realHead, 'this repo has the same HEAD');
-  assert.ok(fs.readFileSync(path.join(REPO_TOP, '.git', 'index')).equals(realIndex), 'this repo has the same index');
+  assert.ok(fs.readFileSync(headFile).equals(realHeadFile), 'this repo has the same HEAD file');
+  assert.ok(fs.readFileSync(indexFile).equals(realIndex), 'this repo has the same index');
 });
 
 test('sandbox.mjs: a CLI row is held only on the exact managed-MCP refusal text; a login message or a short form of the text is a failure; plugin details must list every wanted part with its exact count', async () => {

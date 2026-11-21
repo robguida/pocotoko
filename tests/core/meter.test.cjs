@@ -503,6 +503,77 @@ test('6.6 / SR-C6: handoff_dir is refused (default used, said once) when relativ
   assert.ok(ok.hookSpecificOutput.additionalContext.includes(path.join(good, noteFiles(good)[0])));
 });
 
+test('6.6 a / 6.11 f: the meter uses the one printable-path table and cap; session-start.cjs imports them', () => {
+  const S = require('../../src/core/hooks/session-start.cjs');
+  assert.equal(S.printablePath, M.printablePath);
+  assert.equal(S.UNPRINTABLE_CLASSES, M.UNPRINTABLE_CLASSES);
+  assert.equal(M.LIMITS.PATH_MAX_CHARS, 1024);
+  assert.equal(S.LIMITS.PATH_MAX_CHARS, M.LIMITS.PATH_MAX_CHARS);
+  const src = fs.readFileSync(path.join(H.REPO_TOP, 'src', 'core', 'hooks', 'session-start.cjs'), 'utf8');
+  assert.ok(!/new RegExp\(/.test(src) && !/\\\\u202a/.test(src), 'session-start.cjs holds no copy of the table');
+  assert.equal(M.printablePath('x'.repeat(1024)), true);
+  assert.equal(M.printablePath('x'.repeat(1025)), false);
+  assert.ok(/^[\x20-\x7e]+$/.test(M.LINES.NOTE_UNPRINTABLE), 'ASCII line');
+});
+
+test('6.6 a / 6.11 f (MUST): a hand-off folder whose note path holds a character of each 6.11 f class, or is over 1,024 characters, gets no pre-create and is never named; the warning still fires; the line comes once per session', () => {
+  const b = H.makeBase('hprint');
+  const kit = H.copyKit(b);
+  const env = H.copyEnv(b);
+  const def = path.join(kit.stateRoot, 'handoff');
+  // One character per class; a C0 control only where the OS allows it in a folder name.
+  const cases = [
+    ['controls (C1)', 'a\u0085b'],
+    ['controls (DEL)', 'a\u007fb'],
+    ['separators', 'a b'],
+    ['bidi', 'a‮b'],
+    ['bidi (U+061C)', 'a؜b'],
+    ['zero_width', 'a​b'],
+    ['zero_width (U+FEFF)', 'a﻿b'],
+  ];
+  if (!IS_WIN) cases.push(['controls (C0, line feed)', 'a\nb']);
+  const covered = new Set();
+  let k = 60;
+  for (const [label, name] of cases) {
+    covered.add(label.split(' ')[0]);
+    const dir = H.mk(b.base, name);
+    assert.ok(fs.existsSync(dir), label + ': folder made');
+    writeConfig(kit, { handoff_dir: dir });
+    const sid = H.sessionId(k++);
+    const out = promptAt(b, kit, env, 150000, sid);
+    assert.ok(out && out.hookSpecificOutput, label + ': the warning still fires');
+    assert.match(out.hookSpecificOutput.additionalContext, /start-a-new-session size/, label);
+    const all = out.hookSpecificOutput.additionalContext + '\n' + (out.systemMessage || '');
+    assert.ok(!all.includes(name), label + ': the path is named nowhere');
+    assert.ok(!/hand-off note into/.test(out.hookSpecificOutput.additionalContext), label + ': no note requested');
+    assert.ok(out.systemMessage.includes(M.LINES.NOTE_UNPRINTABLE), label + ': said');
+    assert.equal(noteFiles(dir).length, 0, label + ': nothing pre-created there');
+    assert.equal(noteFiles(def).length, 0, label + ': and not in the default folder');
+    const again = promptAt(b, kit, env, 200000, sid);
+    assert.ok(again && again.hookSpecificOutput, label + ': the repeat still fires');
+    assert.ok(!(again.systemMessage || '').includes(M.LINES.NOTE_UNPRINTABLE), label + ': said once');
+    assert.equal(noteFiles(dir).length, 0, label + ': still nothing pre-created');
+  }
+  assert.deepEqual([...covered].sort(), Object.keys(M.UNPRINTABLE_CLASSES).sort(), 'one case per class');
+  // Over 1,024 characters: a real nested folder, itself over the cap.
+  let longDir = b.base;
+  while (longDir.length <= 1024) longDir = path.join(longDir, 'd'.repeat(120));
+  fs.mkdirSync(longDir, { recursive: true });
+  writeConfig(kit, { handoff_dir: longDir });
+  const long = promptAt(b, kit, env, 150000, H.sessionId(90));
+  assert.ok(long && long.hookSpecificOutput, 'over 1,024: the warning still fires');
+  assert.ok(!(long.hookSpecificOutput.additionalContext + long.systemMessage).includes('d'.repeat(120)), 'over 1,024: not named');
+  assert.ok(long.systemMessage.includes(M.LINES.NOTE_UNPRINTABLE), 'over 1,024: said');
+  assert.equal(noteFiles(longDir).length, 0, 'over 1,024: nothing pre-created');
+  // A control: a printable folder still gets its note, named.
+  const good = H.mk(b.base, 'plain notes');
+  writeConfig(kit, { handoff_dir: good });
+  const ok = promptAt(b, kit, env, 150000, H.sessionId(91));
+  assert.equal(noteFiles(good).length, 1);
+  assert.ok(ok.hookSpecificOutput.additionalContext.includes(path.join(good, noteFiles(good)[0])));
+  assert.ok(!(ok.systemMessage || '').includes(M.LINES.NOTE_UNPRINTABLE));
+});
+
 // ---------------------------------------------------------------------------
 // 6.7: session ids
 

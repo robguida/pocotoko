@@ -361,11 +361,10 @@ test('13.7: before a rendered block runs, its shell is asked what the variables 
   if (!ran) t.skip('neither shell found on this machine');
 });
 
-test('sandbox.mjs and copy-by-hand.mjs share this one guard module', (t) => {
+test('sandbox.mjs and copy-by-hand.mjs both exist and share this one guard module', () => {
   const files = ['sandbox.mjs', 'copy-by-hand.mjs'].map((f) => path.join(REPO, 'scripts', f));
-  const present = files.filter((f) => fs.existsSync(f));
-  if (present.length === 0) { t.skip('both scripts arrive in B9'); return; }
-  for (const f of present) {
+  for (const f of files) assert.ok(fs.existsSync(f), path.basename(f) + ' exists');
+  for (const f of files) {
     assert.match(fs.readFileSync(f, 'utf8'), /from\s+['"]\.\/lib\/guard\.mjs['"]/, path.basename(f) + ' imports the shared guard');
   }
 });

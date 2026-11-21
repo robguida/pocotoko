@@ -611,6 +611,17 @@ test('11 SR-50 points 7 and 9, 3.1 fact 7: README and docs/search.md give the in
   }
   assert.ok(has(norm(read('docs', 'search.md')), 'The never-lists do not fail safe.'));
   assert.ok(has(norm(read('README.md')), 'Notes in the default hand-off folder are deleted with the plugin'));
+  // The options table: each never-list row carries the plugin-install caveat, and the
+  // never_terms row does not state the drop as fact.
+  const rows = {};
+  for (const line of read('docs', 'search.md').split('\n')) {
+    const m = /^\| `(never_folders|never_globs|never_terms)` \|/.exec(line);
+    if (m) rows[m[1]] = line;
+  }
+  assert.deepEqual(Object.keys(rows).sort(), ['never_folders', 'never_globs', 'never_terms'], 'docs/search.md options table rows');
+  for (const [k, line] of Object.entries(rows)) assert.ok(has(line, '(Plugin install: see the caveat in point 9'), k + ' row is missing the plugin-install caveat');
+  assert.ok(has(rows.never_terms, 'until the list form is proven, it may not drop or skip anything'), 'never_terms row: the caveat says it may not drop or skip');
+  assert.ok(!/A chunk holding it is dropped|a file whose path holds it is skipped/.test(rows.never_terms), 'never_terms row must not state the drop as fact');
 });
 
 test('11 / 6.11 h: README "Not yet proven" holds the never-list bullet; the copy-by-hand scope is on the 6.11 h note in session-limits and install; the plugins folder is the folder CLAUDE_CODE_PLUGIN_CACHE_DIR names', () => {
@@ -628,4 +639,13 @@ test('1.4, 17: no docs page or README mentions a sponsor button, and no heading 
     assert.ok(!/sponsor/i.test(text), name + ' mentions a sponsor');
   }
   assert.ok(!/sponsor/i.test(read('README.md')));
+});
+
+test('9.8 / SR-12: the search server\'s copy of the 6.11 f table and cap (server/fsx.cjs) equals the meter\'s, and both give the same answers', () => {
+  const FSX = require('../../src/search/server/fsx.cjs');
+  assert.deepEqual({ ...FSX.UNPRINTABLE_CLASSES }, { ...M.UNPRINTABLE_CLASSES });
+  assert.equal(FSX.PATH_MAX_CHARS, M.LIMITS.PATH_MAX_CHARS);
+  const samples = ['/x/a\u202eb', '/x/a\u0085b', '/x/a\u2028b', '/x/a\u200bb', '/x/a\ufeffb', '/x/a\u0000b', '/x/ab', '/x/\u00e9\u4e2d', 'x'.repeat(1024), 'x'.repeat(1025), ''];
+  for (const p of samples) assert.equal(FSX.printablePath(p), M.printablePath(p), JSON.stringify(p.slice(0, 8)));
+  assert.equal(SRV.LINES.FOLDER_UNPRINTABLE, '(not shown: the folder path holds a character that cannot be shown safely, or is over 1,024 characters)');
 });

@@ -514,3 +514,51 @@ test('Windows: status says the index takes the profile folder permissions (SR-23
     await c.close();
   }
 });
+
+test('9.8 / SR-12 (6.11 f rule): a bound folder holding U+202E (enabled and indexed) or over 1,024 characters (not enabled) is shown in status as the unprintable-folder mask, never as the path', async () => {
+  const run = H.makeBase('unprintable-root', {});
+  const tag = 'rtl' + crypto.randomBytes(3).toString('hex');
+  const bidi = path.join(run.base, tag + '\u202e' + 'dm.krow');
+  fs.mkdirSync(bidi);
+  fs.writeFileSync(path.join(bidi, 'n.md'), '# N\n\nthe marmot note\n');
+  let long = path.join(run.base, 'long' + tag);
+  while (long.length <= 1024) long = path.join(long, 'd'.repeat(120));
+  fs.mkdirSync(long, { recursive: true });
+  const bidiReal = fs.realpathSync.native(bidi);
+  const longReal = fs.realpathSync.native(long);
+  const kit = H.makeKit(run, { options: { projects: [bidiReal] } });
+  const cases = [['U+202E, enabled', bidiReal, true], ['over 1,024 characters, not enabled', longReal, false]];
+  for (const [label, root, enabled] of cases) {
+    // CLAUDE_PROJECT_DIR names the root; the start folder stays short, because Windows cannot start a
+    // process in a folder over its path limit.
+    const c = H.start({ serverFile: kit.serverFile, env: H.childEnv(run, { CLAUDE_PROJECT_DIR: root }), cwd: enabled ? root : run.proj, seams: { gitCeiling: run.base, globalExcludes: null } });
+    try {
+      await c.initialize();
+      const s = enabled ? await H.waitFresh(c) : await H.status(c);
+      assert.equal(s.bound_folder, S.LINES.FOLDER_UNPRINTABLE, label);
+      if (enabled) {
+        assert.equal(s.state, 'fresh', label);
+        const p = H.payloadOf(await c.call('search', { query: 'marmot' }), NOTICE);
+        assert.deepEqual(p.results.map((r) => r.file), ['n.md'], label + ': still indexed');
+      } else {
+        assert.equal(s.reason, 'not enabled for this project', label);
+      }
+      const text = H.textOf(await c.call('status', {}));
+      assert.ok(!text.includes(tag) && !text.includes('\u202e'), label + ': status names no part of the path');
+    } finally {
+      await c.close();
+    }
+    const out = c.lines.join('\n');
+    assert.ok(!out.includes(tag) && !/\u202e/i.test(out) && !out.includes('\u202e'), label + ': stdout names no part of the path');
+  }
+  // A printable bound folder is shown as its path, as before.
+  const plain = path.join(run.base, 'plain');
+  fs.mkdirSync(plain);
+  const c = H.start({ serverFile: kit.serverFile, env: H.childEnv(run, { CLAUDE_PROJECT_DIR: plain }), cwd: plain, seams: { gitCeiling: run.base, globalExcludes: null } });
+  try {
+    const s = await statusOf(c);
+    assert.equal(s.bound_folder, fs.realpathSync.native(plain));
+  } finally {
+    await c.close();
+  }
+});

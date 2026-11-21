@@ -120,8 +120,8 @@ All options are set at user level. Nothing inside a project can set them.
 | `word_families` | `english` | `english`, or `off` to turn word families off. |
 | `extra_types` | empty | Extra file extensions to index. |
 | `never_folders` | empty | Folder names to skip. Narrows only. (Plugin install: see the caveat in point 9.) |
-| `never_globs` | empty | File patterns to skip. Narrows only. |
-| `never_terms` | empty | A term, matched as plain text ignoring case. A chunk holding it is dropped, and a file whose path holds it is skipped. The term never appears in `status` or any file the kit writes. |
+| `never_globs` | empty | File patterns to skip. Narrows only. (Plugin install: see the caveat in point 9.) |
+| `never_terms` | empty | A term, matched as plain text ignoring case. It is meant to drop a chunk holding it and to skip a file whose path holds it. (Plugin install: see the caveat in point 9; until the list form is proven, it may not drop or skip anything.) The term never appears in `status` or any file the kit writes. |
 | `synonyms` | empty | One group per entry, as `term=alt\|alt`. One-way. No commas. Each side is one to three words. |
 | `drop_contacts` | true | Drop chunks holding email addresses or phone numbers. |
 | `max_file_bytes` | 1048576 | Largest file indexed. Kept between 1,024 and 4,194,304. |

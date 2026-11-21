@@ -38,6 +38,28 @@ function isWindows(platform) {
 }
 
 // ---------------------------------------------------------------------------
+// Printable paths (9.8, SR-12; the 6.11 f rule). The search plugin does not ship
+// the core's meter.cjs, so this is the server's own copy of the 6.11 f table and
+// cap; it MUST equal the meter's (consistency.test.cjs checks it). C0 and C1
+// controls; line and paragraph separators; bidi controls; zero-width and
+// invisible characters.
+
+const PATH_MAX_CHARS = 1024;
+const UNPRINTABLE_CLASSES = Object.freeze({
+  controls: '\\u0000-\\u001f\\u007f-\\u009f',
+  separators: '\\u2028\\u2029',
+  bidi: '\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069',
+  zero_width: '\\u200b-\\u200d\\u2060\\ufeff',
+});
+const UNPRINTABLE_RE = new RegExp('[' + Object.values(UNPRINTABLE_CLASSES).join('') + ']', 'u');
+
+/** True when p may be shown: no character of UNPRINTABLE_CLASSES, at most 1,024 characters. */
+function printablePath(p) {
+  if (typeof p !== 'string' || p === '' || p.length > PATH_MAX_CHARS) return false;
+  return !UNPRINTABLE_RE.test(p);
+}
+
+// ---------------------------------------------------------------------------
 // Path compare (SR-5). The only inside check of the server: every other module
 // calls this one.
 
@@ -422,6 +444,9 @@ module.exports = {
   FILE_MODE,
   TEMP_MAX_AGE_MS,
   TEMP_NAME_RE,
+  PATH_MAX_CHARS,
+  UNPRINTABLE_CLASSES,
+  printablePath,
   isInside,
   samePath,
   folderProblem,
