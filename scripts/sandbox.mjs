@@ -422,7 +422,7 @@ async function partB(rep, cli, shells) {
     fs.writeFileSync(path.join(run.project, 'notes.md'), '# Fixture note\n\nThe loopback lighthouse keeps the harbour lamp lit.\n');
     const mcpEnv = { ...env, CLAUDE_PLUGIN_ROOT: search.installPath, CLAUDE_PLUGIN_DATA: searchData, CLAUDE_PROJECT_DIR: run.project };
     for (const [k, v] of Object.entries(mcp.env || {})) {
-      // How a set option arrives at the server is held (needs a logged-in run); here projects is given as one path, the rest unset.
+      // A direct spawn, not Claude Code's own launch (HELD row 1): projects is given as one path, the rest unset; it proves the launch shape only (the arrival form seen for stub servers: changelog, third logged-in run).
       mcpEnv[k] = /user_config\.projects\}/.test(v) ? run.project : '';
     }
     const command = mcp.command === 'node' ? process.execPath : sub(mcp.command);
