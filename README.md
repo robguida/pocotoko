@@ -1,61 +1,74 @@
 # PocoToko
 
+See when a Claude Code chat is getting long, then carry the exact next step into a fresh session with a short hand-off note.
+
 PocoToko is an independent community project, not made, endorsed or supported by Anthropic. Claude and Claude Code are trademarks of Anthropic.
 
-## What it is
-
-A small kit for Claude Code, published as one marketplace with two plugins:
-
-- `pocotoko` (core): model and effort rules, a chat-length meter, a hand-off note skill.
-- `pocotoko-search` (optional): a local keyword search over a project's notes and docs.
-
-Four things come with it:
-
-1. **Dynamic modeling.** Plain rules for picking a model and an effort level for each helper call, sized by how risky the task is. See `docs/dynamic-modeling.md`.
-2. **Session limits.** A meter that warns as a chat gets long, and a skill that writes a hand-off note so you can start fresh. See `docs/session-limits.md`.
-3. **Search.** Exact-word and broader word matching over your notes. See `docs/search.md`.
-4. **Cache guidance.** How the prompt cache works and what disturbs it. See `docs/prompt-cache.md`, and the optional `docs/token-habits.md`.
-
-## What it is not
-
-- It ships no agents and no process guide.
-- It has no meaning-based search.
-- It has no dependencies beyond Node.js built-ins.
-
-## Requirements
+## Quick start
 
 - Node.js 22 or newer, on your `PATH` (check with `node -v`).
 - Claude Code 2.1.329 or later. That is the version this kit was tested on, and both plugin manifests declare it as their floor (the `engines` field).
-- The one-command install form below needs Claude Code 2.1.292 or later from the shell. The tested floor above is the higher of the two.
-- Windows, macOS and Linux are all targets. The tests and checks have been run on all three systems, each on Node 22, 24 and 26.
 
-## Install
+Run this in your terminal to install the core plugin:
 
-Two commands, then one per plugin:
-
-```
-/plugin marketplace add robguida/pocotoko#v<version>
-claude plugin install pocotoko@pocotoko
-claude plugin install pocotoko-search@pocotoko
-```
-
-The last line is optional. It adds search.
-
-Or the one-command form:
-
-```
+```sh
 claude plugin install pocotoko --marketplace robguida/pocotoko
 ```
 
-Then, if you want to change a default, run `/plugin configure`. It holds the meter sizes and the search `projects` list. To show the meter at the bottom of the screen, run the `meter-statusline` skill.
+After installing, open Claude Code in your project. To show the optional chat-length meter at the bottom of the screen, run `/pocotoko:meter-statusline`.
 
-Use `#` to pin a version, as shown: replace `<version>` with a release number. Do not write `@` after a web address: Claude Code then reads it as the address of a marketplace file.
+Before leaving your current session, run `/pocotoko:handoff` to create a hand-off note. Then open a fresh session. If the note appeared in chat, paste it as your first message. If Claude saved the note to a file, ask Claude to read it using the path shown in the previous session.
 
-**Installing from a local folder is for developers only.** It runs the plugin from the source folder, which means the kit saves nothing: no meter warnings, no hand-off files, and search is off. To test plugin mode as a developer, install from a git source. Everyone else installs from the host repo, or copies by hand.
+Example status line and hand-off note:
 
-### Copy by hand
+```text
+chat 112k getting long (warn 100k/150k)
 
-If you do not want the plugin system, `docs/install.md` has the steps for Git Bash, macOS and Linux, and for PowerShell. They copy files into your Claude config folder and add three entries to your settings file.
+Work in flight: Added validation to the import form.
+Next step: Run the import tests and check the error for an empty file.
+Key files: src/import.js, tests/import.test.js
+Open decision: Confirm the empty-file message with the maintainer.
+```
+
+Both terminal methods for installing the core plugin from GitHub were verified with clean Claude Code 2.1.329 profiles on Windows. The automated tests and checks have run on Windows, macOS and Linux, each on Node 22, 24 and 26.
+
+### Add the marketplace separately
+
+To add the marketplace first and choose a plugin separately, run these commands in your terminal:
+
+```sh
+claude plugin marketplace add robguida/pocotoko
+claude plugin install pocotoko@pocotoko
+```
+
+To pin a published tag, append `#` and the tag to the marketplace source. The one-command install form needs Claude Code 2.1.292 or later from the shell. PocoToko's version requirement is listed above.
+
+### Clone the source or copy by hand
+
+Clone the repo to inspect the code, contribute or follow the [copy-by-hand install steps](docs/install.md#copy-by-hand):
+
+```sh
+git clone https://github.com/robguida/pocotoko.git
+```
+
+**Installing from a local folder is for developers only.** It runs the plugin from the source folder, which means the kit saves nothing: no meter warnings, no hand-off files, and search is off. To test plugin mode as a developer, install from a git source.
+
+## What comes with it
+
+- **Core:** Chat-length warnings, the hand-off skill, rules for choosing a model and effort for helper calls, and prompt cache guidance. See [session limits](docs/session-limits.md), [model and effort rules](docs/dynamic-modeling.md) and [prompt cache guidance](docs/prompt-cache.md).
+- **Optional search:** Local keyword search over project notes and docs, with exact and broader word matching. See [search options and limits](docs/search.md).
+
+PocoToko has no dependencies beyond Node.js built-ins. It ships no agents or process guide.
+
+### Add optional search
+
+After adding the marketplace, install search from your terminal:
+
+```sh
+claude plugin install pocotoko-search@pocotoko
+```
+
+Read [Before you turn search on](#before-you-turn-search-on) before listing folders in the `projects` option. In Claude Code, `/plugin configure` opens the plugin settings for the meter or search. Start a new session after changing plugin settings.
 
 ## Windows and the Node program
 
@@ -103,7 +116,6 @@ These are stated as open, not as fact.
 
 - Claude Code starting the real search server itself. The live checks used small stand-in servers. They showed how options reach a plugin's server, that such a server is given the folder the session started in, and that a planted `node` program did not run. In the checks, a stand-in server's never-set text option with a default got that default; for search that would apply to `matching` and `word_families`. Whether an option with no default that you never set (`projects`, `extra_types`, `never_folders`, `never_globs`, `never_terms`, `synonyms`) stops it from starting has not been seen.
 - Whether a never-set `drop_contacts` or `max_file_bytes` (options with a default that are not text) stops the search server from starting, and what value it then gets, has not been seen.
-- The install lines above, run against the host repository. Neither install form has been tried from it yet.
 - In a plugin install, the form a list option takes at the server when you set it through the interactive `/plugin configure` form. In the checks, a list stored as one comma-separated line or as JSON-array text reached a plugin's server as stored. If the interactive form stores it differently, `projects` fails closed (search stays off), but the never-lists (`never_terms`, `never_folders`, `never_globs`) would not narrow anything. Until this and the next item are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
 - In a plugin install, when you change some options with `claude plugin configure`, whether the options you did not name are kept has not been seen. If they were dropped, a never-list could stop narrowing. Until this and the interactive form are proven, keep sensitive files out of enabled projects, or use the `search: do not index` line.
 - Whether the plugin cache folder variable (`CLAUDE_CODE_PLUGIN_CACHE_DIR`) reaches the search server when the cache is really moved to another place. In the checks it reached a plugin's server unchanged, but it was set to the default place there.
