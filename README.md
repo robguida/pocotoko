@@ -1,4 +1,5 @@
 # PocoToko
+Poco (Spanish for "little") + Toko ("token").
 
 See when a Claude Code chat is getting long, then carry the exact next step into a fresh session with a short hand-off note.
 
